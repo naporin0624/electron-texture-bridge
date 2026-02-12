@@ -1,6 +1,6 @@
 {
   "name": "@napolab/texture-bridge-core",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "High-level GPU texture sharing for Electron (Spout + Syphon Metal)",
   "main": "./dist/index.cjs",
   "module": "./dist/index.mjs",

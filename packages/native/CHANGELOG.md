@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.4](https://github.com/naporin0624/electron-texture-bridge/compare/native-v0.3.3...native-v0.3.4) (2026-02-12)
+
+
+### Bug Fixes
+
+* add repository field for npm provenance verification ([32da705](https://github.com/naporin0624/electron-texture-bridge/commit/32da705c2d22796c3db80b8284b083c44279eb88))
+
 ## [0.3.3](https://github.com/naporin0624/electron-texture-bridge/compare/native-v0.3.2...native-v0.3.3) (2026-02-12)
 
 
