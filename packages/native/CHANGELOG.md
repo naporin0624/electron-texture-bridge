@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.3](https://github.com/naporin0624/electron-texture-bridge/compare/native-v0.3.2...native-v0.3.3) (2026-02-12)
+
+
+### Bug Fixes
+
+* replace unused prepublish script with create-npm-dir ([8f6801f](https://github.com/naporin0624/electron-texture-bridge/commit/8f6801f306b37105c3dc8fc54e045155d4cc72da))
+
 ## [0.3.2](https://github.com/naporin0624/electron-texture-bridge/compare/native-v0.3.1...native-v0.3.2) (2026-02-11)
 
 
