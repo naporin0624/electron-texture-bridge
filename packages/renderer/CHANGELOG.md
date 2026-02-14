@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.4.0](https://github.com/naporin0624/electron-texture-bridge/compare/renderer-v0.3.5...renderer-v0.4.0) (2026-02-14)
+
+
+### Features
+
+* add renderer package with high-level createTextureBridge API ([8d44863](https://github.com/naporin0624/electron-texture-bridge/commit/8d44863610d74ace40d9b0568674ca326702be6e))
+* migrate to @napolab/texture-bridge package scope ([2f5d3e4](https://github.com/naporin0624/electron-texture-bridge/commit/2f5d3e4c6a6af61a00ae05dc05e25cdc45ff116a))
+
+
+### Bug Fixes
+
+* add repository field for npm provenance verification ([32da705](https://github.com/naporin0624/electron-texture-bridge/commit/32da705c2d22796c3db80b8284b083c44279eb88))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @napolab/texture-bridge-core bumped to 0.4.0
+
 ## [0.3.5](https://github.com/naporin0624/electron-texture-bridge/compare/renderer-v0.3.4...renderer-v0.3.5) (2026-02-14)
 
 
