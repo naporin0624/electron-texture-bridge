@@ -157,7 +157,7 @@ export async function createTextureBridge(
   // ---- Paint handler ----
   renderWindow.webContents.on("paint", (event: PaintEvent) => {
     const texture = event.texture;
-    if (!texture) return;
+    if (!texture?.textureInfo) return;
 
     try {
       sendTextureFromPaintEvent(

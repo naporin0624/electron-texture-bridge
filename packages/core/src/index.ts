@@ -11,8 +11,9 @@ export type { TextureInfo, PaintTexture, Platform, PixelFormat };
  */
 export function sendTextureFromPaintEvent(
   sender: InstanceType<typeof TextureSender>,
-  textureInfo: TextureInfo,
+  textureInfo: TextureInfo | undefined,
 ): void {
+  if (!textureInfo) return;
   const { handle, codedSize } = textureInfo;
 
   if (process.platform === "win32") {
