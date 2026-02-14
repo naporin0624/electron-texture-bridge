@@ -12,7 +12,7 @@
     "prepare": "husky"
   },
   "lint-staged": {
-    "*.{ts,tsx}": [
+    "packages/*/src/**/*.{ts,tsx}": [
       "oxfmt --check",
       "oxlint"
     ]

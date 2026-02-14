@@ -12,7 +12,6 @@ packages/example/out
 packages/example/dist
 
 # generated (native)
-packages/native/index.d.ts
 packages/native/index.js
 packages/native/npm/
 
