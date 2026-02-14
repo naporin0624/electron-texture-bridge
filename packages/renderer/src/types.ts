@@ -37,18 +37,9 @@ export interface BridgeEvents {
 
 /** High-level texture bridge handle */
 export interface TextureBridge {
-  on<K extends keyof BridgeEvents>(
-    event: K,
-    listener: (...args: BridgeEvents[K]) => void,
-  ): this;
-  off<K extends keyof BridgeEvents>(
-    event: K,
-    listener: (...args: BridgeEvents[K]) => void,
-  ): this;
-  once<K extends keyof BridgeEvents>(
-    event: K,
-    listener: (...args: BridgeEvents[K]) => void,
-  ): this;
+  on<K extends keyof BridgeEvents>(event: K, listener: (...args: BridgeEvents[K]) => void): this;
+  off<K extends keyof BridgeEvents>(event: K, listener: (...args: BridgeEvents[K]) => void): this;
+  once<K extends keyof BridgeEvents>(event: K, listener: (...args: BridgeEvents[K]) => void): this;
 
   /** Open the preview window (no-op if already open) */
   openPreview(): void;

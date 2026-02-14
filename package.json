@@ -6,10 +6,16 @@
     "build:renderer": "pnpm --filter @napolab/texture-bridge-renderer run build",
     "build": "pnpm run build:native && pnpm run build:core && pnpm run build:renderer",
     "dev:example": "pnpm --filter @napolab/texture-bridge-example run dev",
-    "lint": "oxlint packages/*/src",
+    "lint": "oxfmt --check packages/*/src && oxlint packages/*/src",
     "fmt": "oxfmt --write packages/*/src",
-    "fmt:check": "oxfmt --check packages/*/src",
-    "typecheck": "pnpm -r --filter '!@napolab/texture-bridge' run typecheck"
+    "typecheck": "pnpm -r --filter '!@napolab/texture-bridge' run typecheck",
+    "prepare": "husky"
+  },
+  "lint-staged": {
+    "*.{ts,tsx}": [
+      "oxfmt --check",
+      "oxlint"
+    ]
   },
   "pnpm": {
     "onlyBuiltDependencies": [
@@ -21,6 +27,8 @@
   "license": "MIT",
   "devDependencies": {
     "@typescript/native-preview": "7.0.0-dev.20260207.1",
+    "husky": "^9.1.7",
+    "lint-staged": "^16.2.7",
     "oxfmt": "^0.28.0",
     "oxlint": "^1.43.0"
   }

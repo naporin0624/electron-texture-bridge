@@ -33,9 +33,7 @@ export interface WorkerRendererHandle {
  *
  * This runs in the renderer process (browser context) only.
  */
-export function createWorkerRenderer(
-  options: WorkerRendererOptions,
-): WorkerRendererHandle {
+export function createWorkerRenderer(options: WorkerRendererOptions): WorkerRendererHandle {
   const { worker, width, height } = options;
 
   const canvas = options.canvas ?? document.createElement("canvas");

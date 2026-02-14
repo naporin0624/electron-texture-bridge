@@ -14,11 +14,7 @@ export class PreviewManager {
   private height: number;
   private title: string;
 
-  constructor(
-    width: number,
-    height: number,
-    options?: PreviewOptions,
-  ) {
+  constructor(width: number, height: number, options?: PreviewOptions) {
     this.width = width;
     this.height = height;
     this.title = options?.title ?? "Preview (GPU Zero-Copy)";

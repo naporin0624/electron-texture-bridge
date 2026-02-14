@@ -24,6 +24,5 @@ jobs:
 
       - run: pnpm install
 
-      - run: pnpm fmt:check
       - run: pnpm lint
       - run: pnpm typecheck

@@ -1,66 +1,71 @@
-<!DOCTYPE html>
+<!doctype html>
 <html>
-<head>
-  <meta charset="utf-8">
-  <title>Preview (GPU Zero-Copy)</title>
-  <style>
-    * { margin: 0; padding: 0; }
-    body {
-      background: #111;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      height: 100vh;
-      font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-    }
-    #info {
-      position: absolute;
-      top: 10px;
-      left: 10px;
-      color: #0f0;
-      font-family: 'SF Mono', Menlo, monospace;
-      font-size: 12px;
-      background: rgba(0, 0, 0, 0.7);
-      padding: 8px 12px;
-      border-radius: 4px;
-      z-index: 100;
-    }
-    canvas {
-      max-width: 100%;
-      max-height: calc(100vh - 20px);
-      object-fit: contain;
-      background: #000;
-    }
-    .error { color: #f44; }
-  </style>
-</head>
-<body>
-  <div id="info">Initializing WebGPU...</div>
-  <canvas id="preview"></canvas>
+  <head>
+    <meta charset="utf-8" />
+    <title>Preview (GPU Zero-Copy)</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+      }
+      body {
+        background: #111;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        height: 100vh;
+        font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+      }
+      #info {
+        position: absolute;
+        top: 10px;
+        left: 10px;
+        color: #0f0;
+        font-family: "SF Mono", Menlo, monospace;
+        font-size: 12px;
+        background: rgba(0, 0, 0, 0.7);
+        padding: 8px 12px;
+        border-radius: 4px;
+        z-index: 100;
+      }
+      canvas {
+        max-width: 100%;
+        max-height: calc(100vh - 20px);
+        object-fit: contain;
+        background: #000;
+      }
+      .error {
+        color: #f44;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="info">Initializing WebGPU...</div>
+    <canvas id="preview"></canvas>
 
-  <script type="module">
-    const params = new URLSearchParams(location.search);
-    const W = parseInt(params.get('w'), 10) || 1920;
-    const H = parseInt(params.get('h'), 10) || 1080;
+    <script type="module">
+      const params = new URLSearchParams(location.search);
+      const W = parseInt(params.get("w"), 10) || 1920;
+      const H = parseInt(params.get("h"), 10) || 1080;
 
-    const canvas = document.getElementById('preview');
-    canvas.width = W;
-    canvas.height = H;
+      const canvas = document.getElementById("preview");
+      canvas.width = W;
+      canvas.height = H;
 
-    const infoEl = document.getElementById('info');
+      const infoEl = document.getElementById("info");
 
-    let device = null;
-    let context = null;
-    let pipeline = null;
-    let sampler = null;
-    let bindGroupLayout = null;
+      let device = null;
+      let context = null;
+      let pipeline = null;
+      let sampler = null;
+      let bindGroupLayout = null;
 
-    let frameCount = 0;
-    let lastTime = performance.now();
-    let fps = 0;
+      let frameCount = 0;
+      let lastTime = performance.now();
+      let fps = 0;
 
-    const shaderCode = `
+      const shaderCode = `
       struct VertexOutput {
         @builtin(position) position: vec4f,
         @location(0) texCoord: vec2f,
@@ -94,121 +99,123 @@
       }
     `;
 
-    async function initWebGPU() {
-      if (!navigator.gpu) {
-        throw new Error('WebGPU not supported');
-      }
+      async function initWebGPU() {
+        if (!navigator.gpu) {
+          throw new Error("WebGPU not supported");
+        }
 
-      const adapter = await navigator.gpu.requestAdapter();
-      if (!adapter) {
-        throw new Error('No GPU adapter found');
-      }
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) {
+          throw new Error("No GPU adapter found");
+        }
 
-      device = await adapter.requestDevice();
-      context = canvas.getContext('webgpu');
+        device = await adapter.requestDevice();
+        context = canvas.getContext("webgpu");
 
-      const format = navigator.gpu.getPreferredCanvasFormat();
-      context.configure({ device, format, alphaMode: 'opaque' });
+        const format = navigator.gpu.getPreferredCanvasFormat();
+        context.configure({ device, format, alphaMode: "opaque" });
 
-      const shaderModule = device.createShaderModule({ code: shaderCode });
+        const shaderModule = device.createShaderModule({ code: shaderCode });
 
-      sampler = device.createSampler({
-        magFilter: 'linear',
-        minFilter: 'linear',
-      });
+        sampler = device.createSampler({
+          magFilter: "linear",
+          minFilter: "linear",
+        });
 
-      bindGroupLayout = device.createBindGroupLayout({
-        entries: [
-          { binding: 0, visibility: GPUShaderStage.FRAGMENT, externalTexture: {} },
-          { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
-        ],
-      });
-
-      pipeline = device.createRenderPipeline({
-        layout: device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] }),
-        vertex: { module: shaderModule, entryPoint: 'vertexMain' },
-        fragment: {
-          module: shaderModule,
-          entryPoint: 'fragmentMain',
-          targets: [{ format }],
-        },
-        primitive: { topology: 'triangle-list' },
-      });
-
-      infoEl.textContent = 'WebGPU ready, waiting for frames...';
-    }
-
-    function renderFrame(videoFrame) {
-      if (!device || !pipeline || !videoFrame) return;
-
-      try {
-        const externalTexture = device.importExternalTexture({ source: videoFrame });
-
-        const bindGroup = device.createBindGroup({
-          layout: bindGroupLayout,
+        bindGroupLayout = device.createBindGroupLayout({
           entries: [
-            { binding: 0, resource: externalTexture },
-            { binding: 1, resource: sampler },
+            { binding: 0, visibility: GPUShaderStage.FRAGMENT, externalTexture: {} },
+            { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
           ],
         });
 
-        const commandEncoder = device.createCommandEncoder();
-        const textureView = context.getCurrentTexture().createView();
-
-        const renderPass = commandEncoder.beginRenderPass({
-          colorAttachments: [{
-            view: textureView,
-            clearValue: { r: 0, g: 0, b: 0, a: 1 },
-            loadOp: 'clear',
-            storeOp: 'store',
-          }],
+        pipeline = device.createRenderPipeline({
+          layout: device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] }),
+          vertex: { module: shaderModule, entryPoint: "vertexMain" },
+          fragment: {
+            module: shaderModule,
+            entryPoint: "fragmentMain",
+            targets: [{ format }],
+          },
+          primitive: { topology: "triangle-list" },
         });
 
-        renderPass.setPipeline(pipeline);
-        renderPass.setBindGroup(0, bindGroup);
-        renderPass.draw(3);
-        renderPass.end();
-
-        device.queue.submit([commandEncoder.finish()]);
-
-        frameCount++;
-        const now = performance.now();
-        if (now - lastTime >= 1000) {
-          fps = frameCount * 1000 / (now - lastTime);
-          frameCount = 0;
-          lastTime = now;
-        }
-
-        infoEl.textContent = `GPU Zero-Copy | FPS: ${fps.toFixed(1)} | ${videoFrame.displayWidth}x${videoFrame.displayHeight}`;
-      } catch (err) {
-        console.error('[preview] render error:', err);
+        infoEl.textContent = "WebGPU ready, waiting for frames...";
       }
-    }
 
-    async function main() {
-      try {
-        await initWebGPU();
+      function renderFrame(videoFrame) {
+        if (!device || !pipeline || !videoFrame) return;
 
-        window.electronAPI.onTextureFrame((imported) => {
-          try {
-            const videoFrame = imported.getVideoFrame();
-            renderFrame(videoFrame);
-            videoFrame.close();
-            imported.release();
-          } catch (err) {
-            console.error('[preview] texture error:', err);
+        try {
+          const externalTexture = device.importExternalTexture({ source: videoFrame });
+
+          const bindGroup = device.createBindGroup({
+            layout: bindGroupLayout,
+            entries: [
+              { binding: 0, resource: externalTexture },
+              { binding: 1, resource: sampler },
+            ],
+          });
+
+          const commandEncoder = device.createCommandEncoder();
+          const textureView = context.getCurrentTexture().createView();
+
+          const renderPass = commandEncoder.beginRenderPass({
+            colorAttachments: [
+              {
+                view: textureView,
+                clearValue: { r: 0, g: 0, b: 0, a: 1 },
+                loadOp: "clear",
+                storeOp: "store",
+              },
+            ],
+          });
+
+          renderPass.setPipeline(pipeline);
+          renderPass.setBindGroup(0, bindGroup);
+          renderPass.draw(3);
+          renderPass.end();
+
+          device.queue.submit([commandEncoder.finish()]);
+
+          frameCount++;
+          const now = performance.now();
+          if (now - lastTime >= 1000) {
+            fps = (frameCount * 1000) / (now - lastTime);
+            frameCount = 0;
+            lastTime = now;
           }
-        });
 
-        window.electronAPI.previewReady();
-      } catch (err) {
-        console.error('[preview] init error:', err);
-        infoEl.className = 'error';
-        infoEl.textContent = `WebGPU Error: ${err.message}`;
+          infoEl.textContent = `GPU Zero-Copy | FPS: ${fps.toFixed(1)} | ${videoFrame.displayWidth}x${videoFrame.displayHeight}`;
+        } catch (err) {
+          console.error("[preview] render error:", err);
+        }
       }
-    }
 
-    main();
-  </script>
-</body>
+      async function main() {
+        try {
+          await initWebGPU();
+
+          window.electronAPI.onTextureFrame((imported) => {
+            try {
+              const videoFrame = imported.getVideoFrame();
+              renderFrame(videoFrame);
+              videoFrame.close();
+              imported.release();
+            } catch (err) {
+              console.error("[preview] texture error:", err);
+            }
+          });
+
+          window.electronAPI.previewReady();
+        } catch (err) {
+          console.error("[preview] init error:", err);
+          infoEl.className = "error";
+          infoEl.textContent = `WebGPU Error: ${err.message}`;
+        }
+      }
+
+      main();
+    </script>
+  </body>
 </html>

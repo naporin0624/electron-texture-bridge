@@ -1,43 +1,51 @@
-<!DOCTYPE html>
+<!doctype html>
 <html>
-<head>
-  <meta charset="utf-8">
-  <title>Texture Bridge - Three.js Raymarching VJ</title>
-  <style>* { margin: 0; padding: 0; } canvas { display: block; }</style>
-</head>
-<body>
-  <canvas id="canvas" width="1920" height="1080"></canvas>
-  <script type="module">
-    import RenderWorker from './render-worker?worker';
-
-    const canvas = document.getElementById('canvas');
-    const offscreen = canvas.transferControlToOffscreen();
-
-    // Create worker with bundled Three.js
-    const worker = new RenderWorker();
-    worker.postMessage({ type: 'init', canvas: offscreen }, [offscreen]);
-
-    // Audio-reactive simulation (replace with real Web Audio API analysis)
-    // In a real VJ app, use AudioContext + AnalyserNode
-    setInterval(() => {
-      // Simulate low/mid/high frequency analysis
-      worker.postMessage({
-        type: 'audio',
-        bass: Math.pow(Math.random(), 2) * 0.5,
-        mid: Math.pow(Math.random(), 2) * 0.3,
-        high: Math.pow(Math.random(), 2) * 0.2,
-      });
-    }, 50);
-
-    // Simulate beat detection at ~120 BPM
-    setInterval(() => {
-      if (Math.random() > 0.3) {
-        worker.postMessage({ type: 'beat' });
+  <head>
+    <meta charset="utf-8" />
+    <title>Texture Bridge - Three.js Raymarching VJ</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
       }
-    }, 500);
+      canvas {
+        display: block;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="canvas" width="1920" height="1080"></canvas>
+    <script type="module">
+      import RenderWorker from "./render-worker?worker";
 
-    // Example: Real audio analysis would look like this:
-    /*
+      const canvas = document.getElementById("canvas");
+      const offscreen = canvas.transferControlToOffscreen();
+
+      // Create worker with bundled Three.js
+      const worker = new RenderWorker();
+      worker.postMessage({ type: "init", canvas: offscreen }, [offscreen]);
+
+      // Audio-reactive simulation (replace with real Web Audio API analysis)
+      // In a real VJ app, use AudioContext + AnalyserNode
+      setInterval(() => {
+        // Simulate low/mid/high frequency analysis
+        worker.postMessage({
+          type: "audio",
+          bass: Math.pow(Math.random(), 2) * 0.5,
+          mid: Math.pow(Math.random(), 2) * 0.3,
+          high: Math.pow(Math.random(), 2) * 0.2,
+        });
+      }, 50);
+
+      // Simulate beat detection at ~120 BPM
+      setInterval(() => {
+        if (Math.random() > 0.3) {
+          worker.postMessage({ type: "beat" });
+        }
+      }, 500);
+
+      // Example: Real audio analysis would look like this:
+      /*
     const audioContext = new AudioContext();
     const analyser = audioContext.createAnalyser();
     analyser.fftSize = 256;
@@ -62,6 +70,6 @@
       analyzeAudio();
     });
     */
-  </script>
-</body>
+    </script>
+  </body>
 </html>

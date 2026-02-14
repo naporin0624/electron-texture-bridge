@@ -47,12 +47,9 @@ app.whenReady().then(async () => {
     console.error("[example] bridge error:", err.message);
   });
 
-  bridge.renderWindow.webContents.on(
-    "did-fail-load",
-    (_event, errorCode, errorDesc) => {
-      console.error("[example] did-fail-load:", errorCode, errorDesc);
-    },
-  );
+  bridge.renderWindow.webContents.on("did-fail-load", (_event, errorCode, errorDesc) => {
+    console.error("[example] did-fail-load:", errorCode, errorDesc);
+  });
 });
 
 app.on("window-all-closed", () => {

@@ -104,24 +104,12 @@ class TextureBridgeImpl extends EventEmitter implements TextureBridge {
  *
  * Must be called after `app.whenReady()`.
  */
-export async function createTextureBridge(
-  options: TextureBridgeOptions,
-): Promise<TextureBridge> {
+export async function createTextureBridge(options: TextureBridgeOptions): Promise<TextureBridge> {
   if (!app.isReady()) {
-    throw new Error(
-      "createTextureBridge() must be called after app.whenReady()",
-    );
+    throw new Error("createTextureBridge() must be called after app.whenReady()");
   }
 
-  const {
-    name,
-    width,
-    height,
-    frameRate = 60,
-    rendererUrl,
-    preview,
-    webPreferences,
-  } = options;
+  const { name, width, height, frameRate = 60, rendererUrl, preview, webPreferences } = options;
 
   // ---- Offscreen BrowserWindow ----
   const renderWindow = new BrowserWindow({
@@ -147,12 +135,7 @@ export async function createTextureBridge(
   }
 
   // ---- Bridge instance ----
-  const bridge = new TextureBridgeImpl(
-    renderWindow,
-    sender,
-    previewManager,
-    options,
-  );
+  const bridge = new TextureBridgeImpl(renderWindow, sender, previewManager, options);
 
   // ---- Paint handler ----
   renderWindow.webContents.on("paint", (event: PaintEvent) => {
@@ -160,14 +143,10 @@ export async function createTextureBridge(
     if (!texture?.textureInfo) return;
 
     try {
-      sendTextureFromPaintEvent(
-        (bridge as any).sender,
-        texture.textureInfo,
-      );
+      sendTextureFromPaintEvent((bridge as any).sender, texture.textureInfo);
       (bridge as any).previewManager?.sendFrame(texture);
     } catch (err) {
-      const error =
-        err instanceof Error ? err : new Error(String(err));
+      const error = err instanceof Error ? err : new Error(String(err));
       bridge.emit("error", error);
     } finally {
       texture.release?.();
