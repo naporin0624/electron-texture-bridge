@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.5](https://github.com/naporin0624/electron-texture-bridge/compare/native-v0.3.4...native-v0.3.5) (2026-02-14)
+
+
+### Bug Fixes
+
+* include napi-rs loader files (index.js, index.d.ts) in publish ([8f6f697](https://github.com/naporin0624/electron-texture-bridge/commit/8f6f697))
+
 ## [0.3.4](https://github.com/naporin0624/electron-texture-bridge/compare/native-v0.3.3...native-v0.3.4) (2026-02-12)
 
 
