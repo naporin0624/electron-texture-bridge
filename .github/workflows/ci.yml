@@ -25,4 +25,5 @@ jobs:
       - run: pnpm install
 
       - run: pnpm lint
+      - run: pnpm build:core
       - run: pnpm typecheck
