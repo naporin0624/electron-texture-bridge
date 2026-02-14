@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.4.1](https://github.com/naporin0624/electron-texture-bridge/compare/renderer-v0.4.0...renderer-v0.4.1) (2026-02-14)
+
+
+### Bug Fixes
+
+* guard against undefined textureInfo in paint event ([#10](https://github.com/naporin0624/electron-texture-bridge/issues/10)) ([f9f20e4](https://github.com/naporin0624/electron-texture-bridge/commit/f9f20e49efb1857c42a895c52ccd2a6d8bc2c49e))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @napolab/texture-bridge-core bumped to 0.4.1
+
 ## [0.4.0](https://github.com/naporin0624/electron-texture-bridge/compare/renderer-v0.3.5...renderer-v0.4.0) (2026-02-14)
 
 
