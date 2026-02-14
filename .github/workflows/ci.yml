@@ -25,5 +25,5 @@ jobs:
       - run: pnpm install
 
       - run: pnpm lint
-      - run: pnpm build:core
+      - run: pnpm build:core && pnpm build:renderer
       - run: pnpm typecheck
