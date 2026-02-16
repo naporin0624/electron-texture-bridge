@@ -39,6 +39,17 @@ app.whenReady().then(async () => {
     preview: { enabled: true, width: 960, height: 540 },
   });
 
+  // Scene switching: keys 1, 2, 3
+  const sceneNames = ["Raymarching", "Fractal", "Voronoi"];
+  for (let i = 0; i < sceneNames.length; i++) {
+    globalShortcut.register(`${i + 1}`, () => {
+      bridge.renderWindow.webContents.executeJavaScript(
+        `globalThis.__renderWorker?.postMessage({ type: 'scene', index: ${i} })`,
+      );
+      console.log(`[example] Scene ${i + 1}: ${sceneNames[i]}`);
+    });
+  }
+
   bridge.on("fps", (fps) => {
     console.log(`[example] FPS: ${fps.toFixed(1)}`);
   });

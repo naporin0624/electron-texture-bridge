@@ -17,6 +17,9 @@
     const worker = new RenderWorker();
     worker.postMessage({ type: 'init', canvas: offscreen }, [offscreen]);
 
+    // Expose worker for main process scene switching via executeJavaScript
+    globalThis.__renderWorker = worker;
+
     // Audio-reactive simulation (replace with real Web Audio API analysis)
     // In a real VJ app, use AudioContext + AnalyserNode
     setInterval(() => {

@@ -1,0 +1,116 @@
+name: Example App
+
+on:
+  workflow_dispatch:
+    inputs:
+      upload_to_release:
+        description: 'Upload to latest GitHub Release'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  build-example:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+            builder_args: --mac --arm64
+            name: macOS-arm64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            builder_args: --win --x64
+            name: Windows-x64
+
+    runs-on: ${{ matrix.os }}
+    name: Build (${{ matrix.name }})
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # macOS: Build Syphon.framework
+      - name: Build Syphon.framework
+        if: runner.os == 'macOS'
+        run: |
+          cd vendor/syphon-src
+          xcodebuild -project Syphon.xcodeproj \
+            -scheme Syphon \
+            -configuration Release \
+            -derivedDataPath build \
+            ONLY_ACTIVE_ARCH=NO \
+            BUILD_LIBRARY_FOR_DISTRIBUTION=YES
+          cp -R build/Build/Products/Release/Syphon.framework ../Syphon.framework
+
+      # Windows: Fetch Spout2 SDK
+      - name: Fetch Spout2 SDK
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          git clone --depth 1 https://github.com/leadedge/Spout2.git _spout2_tmp
+          New-Item -ItemType Directory -Force vendor/Spout2
+          Copy-Item -Recurse _spout2_tmp/SPOUTSDK/SpoutDirectX vendor/Spout2/SpoutDirectX
+          Copy-Item -Recurse _spout2_tmp/SPOUTSDK/SpoutGL vendor/Spout2/SpoutGL
+          Remove-Item -Recurse -Force _spout2_tmp
+
+      - run: pnpm install
+
+      - name: Build native addon
+        working-directory: packages/native
+        run: pnpm run build
+        env:
+          CARGO_BUILD_TARGET: ${{ matrix.target }}
+
+      - name: Build core
+        run: pnpm --filter @napolab/texture-bridge-core run build
+
+      - name: Build renderer
+        run: pnpm --filter @napolab/texture-bridge-renderer run build
+
+      - name: Build & package example
+        working-directory: packages/example
+        run: pnpm run build && npx electron-builder ${{ matrix.builder_args }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: example-${{ matrix.name }}
+          path: |
+            packages/example/dist/*.dmg
+            packages/example/dist/*.zip
+            packages/example/dist/*.exe
+          if-no-files-found: error
+
+      - name: Upload to GitHub Release
+        if: inputs.upload_to_release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG=$(gh release list --limit 1 --json tagName -q '.[0].tagName')
+          if [ -z "$TAG" ]; then
+            echo "No release found, skipping upload"
+            exit 0
+          fi
+          echo "Uploading to release $TAG"
+          for f in packages/example/dist/*.dmg packages/example/dist/*.zip packages/example/dist/*.exe; do
+            [ -f "$f" ] && gh release upload "$TAG" "$f" --clobber || true
+          done

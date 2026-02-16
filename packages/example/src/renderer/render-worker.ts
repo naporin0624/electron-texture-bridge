@@ -1,26 +1,43 @@
 /**
- * Three.js + GLSL Raymarching Render Worker
+ * Three.js + GLSL Render Worker with Multi-Scene Support
  *
  * This worker renders VJ-style visuals using Three.js with custom GLSL shaders.
  * The rendered output is captured by Electron's paint event and sent to
  * Syphon/Spout for use in VJ software like Resolume, VDMX, OBS, etc.
+ *
+ * Scenes can be switched at runtime via postMessage({ type: 'scene', index }).
  */
 
 import * as THREE from "three";
 import vertexShader from "./shaders/raymarching.vert?raw";
-import fragmentShader from "./shaders/raymarching.frag?raw";
+import raymarchingFrag from "./shaders/raymarching.frag?raw";
+import fractalFrag from "./shaders/fractal.frag?raw";
+import voronoiFrag from "./shaders/voronoi.frag?raw";
 
 // Declare self as worker context
 declare const self: DedicatedWorkerGlobalScope;
+
+// ============================================================================
+// Scene Registry
+// ============================================================================
+
+const scenes = [
+  { name: "Raymarching", fragmentShader: raymarchingFrag },
+  { name: "Fractal", fragmentShader: fractalFrag },
+  { name: "Voronoi", fragmentShader: voronoiFrag },
+];
+
+let currentSceneIndex = 0;
 
 // ============================================================================
 // Worker State
 // ============================================================================
 
 let renderer: THREE.WebGLRenderer | null = null;
-let scene: THREE.Scene | null = null;
+let threeScene: THREE.Scene | null = null;
 let camera: THREE.OrthographicCamera | null = null;
 let material: THREE.ShaderMaterial | null = null;
+let mesh: THREE.Mesh | null = null;
 let startTime: number = 0;
 let canvasSize = { width: 1920, height: 1080 };
 
@@ -56,11 +73,59 @@ self.onmessage = (e: MessageEvent) => {
     case "beat":
       audioData.beat = 1.0;
       break;
+
+    case "scene":
+      switchScene(data.index);
+      break;
   }
 };
 
 function lerp(a: number, b: number, t: number): number {
   return a + (b - a) * t;
+}
+
+// ============================================================================
+// Material Creation
+// ============================================================================
+
+function createMaterial(fragmentShader: string): THREE.ShaderMaterial {
+  return new THREE.ShaderMaterial({
+    vertexShader,
+    fragmentShader,
+    uniforms: {
+      u_time: { value: 0.0 },
+      u_resolution: {
+        value: new THREE.Vector2(canvasSize.width, canvasSize.height),
+      },
+      u_bass: { value: 0.0 },
+      u_mid: { value: 0.0 },
+      u_high: { value: 0.0 },
+      u_beat: { value: 0.0 },
+    },
+    depthTest: false,
+    depthWrite: false,
+  });
+}
+
+// ============================================================================
+// Scene Switching
+// ============================================================================
+
+function switchScene(index: number) {
+  if (index < 0 || index >= scenes.length) return;
+  if (index === currentSceneIndex) return;
+  if (!mesh) return;
+
+  const scene = scenes[index];
+  const oldMaterial = material;
+
+  material = createMaterial(scene.fragmentShader);
+  mesh.material = material;
+  currentSceneIndex = index;
+
+  if (oldMaterial) oldMaterial.dispose();
+
+  console.log(`[render-worker] Switched to scene ${index + 1}: ${scene.name}`);
 }
 
 // ============================================================================
@@ -84,33 +149,20 @@ function init(canvas: OffscreenCanvas) {
   renderer.setPixelRatio(1);
   renderer.outputColorSpace = THREE.SRGBColorSpace;
 
-  scene = new THREE.Scene();
+  threeScene = new THREE.Scene();
   camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
 
-  material = new THREE.ShaderMaterial({
-    vertexShader,
-    fragmentShader,
-    uniforms: {
-      u_time: { value: 0.0 },
-      u_resolution: {
-        value: new THREE.Vector2(canvasSize.width, canvasSize.height),
-      },
-      u_bass: { value: 0.0 },
-      u_mid: { value: 0.0 },
-      u_high: { value: 0.0 },
-      u_beat: { value: 0.0 },
-    },
-    depthTest: false,
-    depthWrite: false,
-  });
+  material = createMaterial(scenes[currentSceneIndex].fragmentShader);
 
   const geometry = new THREE.PlaneGeometry(2, 2);
-  const mesh = new THREE.Mesh(geometry, material);
-  scene.add(mesh);
+  mesh = new THREE.Mesh(geometry, material);
+  threeScene.add(mesh);
 
   animate();
 
-  console.log("[render-worker] Three.js initialized with raymarching shader");
+  console.log(
+    `[render-worker] Three.js initialized with ${scenes[currentSceneIndex].name} shader`,
+  );
 }
 
 function resize(width: number, height: number) {
@@ -130,7 +182,7 @@ function resize(width: number, height: number) {
 function animate() {
   requestAnimationFrame(animate);
 
-  if (!renderer || !scene || !camera || !material) return;
+  if (!renderer || !threeScene || !camera || !material) return;
 
   const elapsed = (performance.now() - startTime) / 1000;
   material.uniforms.u_time.value = elapsed;
@@ -141,5 +193,5 @@ function animate() {
 
   audioData.beat *= 0.92;
 
-  renderer.render(scene, camera);
+  renderer.render(threeScene, camera);
 }

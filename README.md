@@ -114,6 +114,18 @@ pnpm build          # Builds native addon + core + renderer packages
 
 ## Quick Start
 
+```typescript
+// main process — that's it, GPU textures are now shared to VJ software
+import { createTextureBridge } from "@napolab/texture-bridge-renderer";
+
+const bridge = await createTextureBridge({
+  name: "MyApp",
+  width: 1920,
+  height: 1080,
+  rendererUrl: "path/to/index.html", // your WebGL/Canvas page
+});
+```
+
 ### High-Level: Factory API (recommended)
 
 The simplest way to use electron-texture-bridge. The factory handles offscreen window creation, paint event wiring, Syphon/Spout sender, and optional preview window — all in one call.
@@ -327,8 +339,10 @@ type Platform = "spout" | "syphon-metal" | "unsupported";
 
 The `packages/example/` directory contains a full VJ application demonstrating:
 
-- **Three.js + GLSL raymarching** in an OffscreenCanvas Web Worker
-- **SDF-based 3D visuals** with audio-reactive parameters
+- **Three.js + GLSL shaders** in an OffscreenCanvas Web Worker
+- **3 switchable scenes**: Raymarching (3D SDF), Julia set fractal, Voronoi flow field
+- **Keyboard switching**: Press `1` / `2` / `3` to switch scenes live
+- **Audio-reactive parameters** driving all scenes
 - **WebGPU preview window** with GPU zero-copy texture display
 - **Syphon/Spout output** for integration with professional VJ software
 
