@@ -26,6 +26,7 @@
   },
   "scripts": {
     "build": "tsdown src/index.ts src/client/index.ts src/client/worker-protocol.ts --format cjs,esm --dts && cp -r src/assets dist/assets",
+    "test": "vitest run",
     "typecheck": "tsgo --noEmit"
   },
   "dependencies": {

@@ -5,6 +5,20 @@
 
 /** Returns the current platform's texture sharing protocol name. */
 export declare function getPlatform(): string
+/** napi-rs object returned from receiveFrame() */
+export interface ReceivedFrame {
+  data: Buffer
+  width: number
+  height: number
+}
+/** napi-rs object returned from listSenders() */
+export interface JsSenderInfo {
+  name: string
+  appName?: string
+  uuid?: string
+}
+/** List all available texture senders (Syphon servers / Spout senders). */
+export declare function listSenders(): Array<JsSenderInfo>
 export declare class TextureSender {
   /**
    * Create a new texture sender.
@@ -48,6 +62,33 @@ export declare class TextureSender {
    * - `bytes_per_row`: Optional stride in bytes. Defaults to width * 4 if not provided.
    */
   sendRgbaBuffer(data: Buffer, width: number, height: number, bytesPerRow?: number | undefined | null): void
+  /** Get the current platform name. */
+  platform(): string
+}
+export declare class TextureReceiver {
+  /**
+   * Create a new texture receiver.
+   *
+   * - `sender_name`: Name of the Syphon server / Spout sender to connect to
+   * - `app_name`: (macOS only) Filter by application name
+   * - `server_uuid`: (macOS only) Connect by server UUID (highest priority)
+   */
+  constructor(senderName: string, appName?: string | undefined | null, serverUuid?: string | undefined | null)
+  /** Returns true if the server has output a new frame since the last receive. */
+  hasNewFrame(): boolean
+  /**
+   * Receive the current frame as RGBA pixel data.
+   * Returns null if no frame is available.
+   */
+  receiveFrame(): ReceivedFrame | null
+  /** Returns true if the receiver has a valid connection to a server. */
+  isConnected(): boolean
+  /** Get the width of the last received texture. */
+  getWidth(): number
+  /** Get the height of the last received texture. */
+  getHeight(): number
+  /** Stop the receiver and release resources. */
+  stop(): void
   /** Get the current platform name. */
   platform(): string
 }

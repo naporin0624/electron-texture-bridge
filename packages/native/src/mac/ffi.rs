@@ -26,4 +26,29 @@ extern "C" {
         height: u32,
         bytes_per_row: u32,
     ) -> i32;
+
+    // ---- Receiver ----
+    pub fn syphon_receiver_create(
+        server_uuid: *const c_char,
+        server_name: *const c_char,
+        app_name: *const c_char,
+    ) -> SyphonReceiverHandle;
+    pub fn syphon_receiver_destroy(handle: SyphonReceiverHandle);
+    pub fn syphon_receiver_has_new_frame(handle: SyphonReceiverHandle) -> i32;
+    pub fn syphon_receiver_receive_rgba(
+        handle: SyphonReceiverHandle,
+        out_buffer: *mut u8,
+        buffer_size: u32,
+        out_width: *mut u32,
+        out_height: *mut u32,
+    ) -> i32;
+    pub fn syphon_receiver_is_valid(handle: SyphonReceiverHandle) -> i32;
+    pub fn syphon_receiver_get_width(handle: SyphonReceiverHandle) -> u32;
+    pub fn syphon_receiver_get_height(handle: SyphonReceiverHandle) -> u32;
+
+    // ---- Discovery ----
+    pub fn syphon_discovery_list_servers() -> *mut c_char;
+    pub fn syphon_discovery_free_string(str: *mut c_char);
 }
+
+pub type SyphonReceiverHandle = *mut std::ffi::c_void;

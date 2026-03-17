@@ -8,6 +8,7 @@
     "dev:example": "pnpm --filter @napolab/texture-bridge-example run dev",
     "lint": "oxfmt --check packages/*/src && oxlint packages/*/src",
     "fmt": "oxfmt --write packages/*/src",
+    "test": "pnpm -r --filter '!@napolab/texture-bridge' --filter '!@napolab/texture-bridge-example' run test",
     "typecheck": "pnpm -r --filter '!@napolab/texture-bridge' run typecheck",
     "prepare": "husky"
   },
@@ -30,6 +31,7 @@
     "husky": "^9.1.7",
     "lint-staged": "^16.2.7",
     "oxfmt": "^0.28.0",
-    "oxlint": "^1.43.0"
+    "oxlint": "^1.43.0",
+    "vitest": "^4.1.0"
   }
 }

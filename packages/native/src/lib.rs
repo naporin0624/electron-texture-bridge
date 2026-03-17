@@ -171,3 +171,262 @@ pub fn get_platform() -> String {
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     return "unsupported".to_string();
 }
+
+// ============================================================
+// Sender info for discovery
+// ============================================================
+
+/// Information about an available texture sender (Syphon server / Spout sender).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SenderInfo {
+    pub name: String,
+    pub app_name: Option<String>,
+    pub uuid: Option<String>,
+}
+
+/// Parse a JSON string from the C++ discovery bridge into a Vec<SenderInfo>.
+fn parse_senders_json(json: &str) -> std::result::Result<Vec<SenderInfo>, String> {
+    let array: Vec<serde_json::Value> =
+        serde_json::from_str(json).map_err(|e| format!("Invalid JSON: {}", e))?;
+
+    array
+        .into_iter()
+        .map(|v| {
+            let name = v
+                .get("name")
+                .and_then(|n| n.as_str())
+                .ok_or_else(|| "Missing 'name' field in sender info".to_string())?;
+            let app_name = v.get("appName").and_then(|n| n.as_str()).map(String::from);
+            let uuid = v.get("uuid").and_then(|n| n.as_str()).map(String::from);
+            Ok(SenderInfo {
+                name: name.to_string(),
+                app_name,
+                uuid,
+            })
+        })
+        .collect()
+}
+
+// ============================================================
+// JS API: TextureReceiver
+//
+//   const receiver = new TextureReceiver("ServerName")
+//   if (receiver.hasNewFrame()) {
+//     const frame = receiver.receiveFrame()
+//     // frame: { data: Buffer, width: number, height: number }
+//   }
+//   receiver.stop()
+//
+// ============================================================
+
+/// napi-rs object returned from receiveFrame()
+#[napi(object)]
+pub struct ReceivedFrame {
+    pub data: napi::bindgen_prelude::Buffer,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// napi-rs object returned from listSenders()
+#[napi(object)]
+pub struct JsSenderInfo {
+    pub name: String,
+    pub app_name: Option<String>,
+    pub uuid: Option<String>,
+}
+
+#[napi]
+pub struct TextureReceiver {
+    #[cfg(target_os = "macos")]
+    inner: mac::receiver::Receiver,
+    #[cfg(target_os = "windows")]
+    inner: win::receiver::Receiver,
+}
+
+#[napi]
+impl TextureReceiver {
+    /// Create a new texture receiver.
+    ///
+    /// - `sender_name`: Name of the Syphon server / Spout sender to connect to
+    /// - `app_name`: (macOS only) Filter by application name
+    /// - `server_uuid`: (macOS only) Connect by server UUID (highest priority)
+    #[napi(constructor)]
+    pub fn new(
+        sender_name: String,
+        app_name: Option<String>,
+        server_uuid: Option<String>,
+    ) -> Result<Self> {
+        #[cfg(target_os = "macos")]
+        let inner = mac::receiver::Receiver::new(
+            server_uuid.as_deref(),
+            Some(&sender_name),
+            app_name.as_deref(),
+        )
+        .map_err(|e| Error::from_reason(e))?;
+
+        #[cfg(target_os = "windows")]
+        let inner = win::receiver::Receiver::new(&sender_name)
+            .map_err(|e| Error::from_reason(e))?;
+
+        Ok(Self { inner })
+    }
+
+    /// Returns true if the server has output a new frame since the last receive.
+    #[napi]
+    pub fn has_new_frame(&self) -> bool {
+        self.inner.has_new_frame()
+    }
+
+    /// Receive the current frame as RGBA pixel data.
+    /// Returns null if no frame is available.
+    #[napi]
+    pub fn receive_frame(&self) -> Result<Option<ReceivedFrame>> {
+        match self.inner.receive_rgba() {
+            Ok(Some((data, width, height))) => Ok(Some(ReceivedFrame {
+                data: data.into(),
+                width,
+                height,
+            })),
+            Ok(None) => Ok(None),
+            Err(e) => Err(Error::from_reason(e)),
+        }
+    }
+
+    /// Returns true if the receiver has a valid connection to a server.
+    #[napi]
+    pub fn is_connected(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        return self.inner.is_valid();
+        #[cfg(target_os = "windows")]
+        return self.inner.is_connected();
+    }
+
+    /// Get the width of the last received texture.
+    #[napi]
+    pub fn get_width(&self) -> u32 {
+        self.inner.width()
+    }
+
+    /// Get the height of the last received texture.
+    #[napi]
+    pub fn get_height(&self) -> u32 {
+        self.inner.height()
+    }
+
+    /// Stop the receiver and release resources.
+    #[napi]
+    pub fn stop(&self) -> Result<()> {
+        // Actual cleanup happens in Drop
+        Ok(())
+    }
+
+    /// Get the current platform name.
+    #[napi]
+    pub fn platform(&self) -> String {
+        #[cfg(target_os = "windows")]
+        return "spout".to_string();
+        #[cfg(target_os = "macos")]
+        return "syphon-metal".to_string();
+    }
+}
+
+/// List all available texture senders (Syphon servers / Spout senders).
+#[napi]
+pub fn list_senders() -> Result<Vec<JsSenderInfo>> {
+    #[cfg(target_os = "macos")]
+    let json = mac::receiver::list_servers_json()
+        .map_err(|e| Error::from_reason(e))?;
+
+    #[cfg(target_os = "windows")]
+    let json = win::receiver::list_senders_json()
+        .map_err(|e| Error::from_reason(e))?;
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let json = "[]".to_string();
+
+    let infos = parse_senders_json(&json)
+        .map_err(|e| Error::from_reason(e))?;
+
+    Ok(infos
+        .into_iter()
+        .map(|info| JsSenderInfo {
+            name: info.name,
+            app_name: info.app_name,
+            uuid: info.uuid,
+        })
+        .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_senders_json_valid_array() {
+        let json = r#"[{"name":"VJ","appName":"Resolume","uuid":"abc-123"}]"#;
+        let result = parse_senders_json(json).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name, "VJ");
+        assert_eq!(result[0].app_name, Some("Resolume".to_string()));
+        assert_eq!(result[0].uuid, Some("abc-123".to_string()));
+    }
+
+    #[test]
+    fn parse_senders_json_multiple_senders() {
+        let json = r#"[{"name":"A","appName":"App1","uuid":"1"},{"name":"B"}]"#;
+        let result = parse_senders_json(json).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].name, "A");
+        assert_eq!(result[1].name, "B");
+        assert_eq!(result[1].app_name, None);
+        assert_eq!(result[1].uuid, None);
+    }
+
+    #[test]
+    fn parse_senders_json_empty_array() {
+        let json = "[]";
+        let result = parse_senders_json(json).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn parse_senders_json_invalid_json() {
+        let json = "not valid json";
+        let result = parse_senders_json(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_senders_json_missing_name() {
+        let json = r#"[{"appName":"App"}]"#;
+        let result = parse_senders_json(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn sender_info_to_js_sender_info_conversion() {
+        let info = SenderInfo {
+            name: "Test".to_string(),
+            app_name: Some("App".to_string()),
+            uuid: None,
+        };
+        let js_info = JsSenderInfo {
+            name: info.name.clone(),
+            app_name: info.app_name.clone(),
+            uuid: info.uuid.clone(),
+        };
+        assert_eq!(js_info.name, "Test");
+        assert_eq!(js_info.app_name, Some("App".to_string()));
+        assert_eq!(js_info.uuid, None);
+    }
+
+    #[test]
+    fn parse_senders_json_with_null_fields() {
+        let json = r#"[{"name":"VJ","appName":null,"uuid":null}]"#;
+        let result = parse_senders_json(json).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name, "VJ");
+        assert_eq!(result[0].app_name, None);
+        assert_eq!(result[0].uuid, None);
+    }
+}

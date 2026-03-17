@@ -1,4 +1,5 @@
 mod ffi;
+pub mod receiver;
 
 use crate::types::RawTextureHandle;
 use std::ffi::CString;

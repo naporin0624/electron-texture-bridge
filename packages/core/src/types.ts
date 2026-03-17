@@ -20,3 +20,17 @@ export interface PaintTexture {
 
 /** Platform-specific texture sharing protocol */
 export type Platform = "spout" | "syphon-metal" | "unsupported";
+
+/** Information about an available texture sender (Syphon server / Spout sender) */
+export interface SenderInfo {
+  name: string;
+  appName?: string;
+  uuid?: string;
+}
+
+/** A received frame with RGBA pixel data */
+export interface ReceivedFrame {
+  data: Buffer;
+  width: number;
+  height: number;
+}

@@ -228,4 +228,224 @@ int syphon_bridge_send_rgba(SyphonBridgeHandle handle,
     }
 }
 
+// ============================================================
+// Receiver (SyphonMetalClient)
+// ============================================================
+
+struct SyphonReceiverBridge {
+    id<MTLDevice>       device;
+    id<MTLCommandQueue> commandQueue;
+    SyphonMetalClient*  client;
+    uint32_t            lastWidth;
+    uint32_t            lastHeight;
+};
+
+SyphonReceiverHandle syphon_receiver_create(const char* server_uuid,
+                                             const char* server_name,
+                                             const char* app_name) {
+    @autoreleasepool {
+        // Find the server in the directory
+        SyphonServerDirectory* dir = [SyphonServerDirectory sharedDirectory];
+        NSArray* servers = dir.servers;
+
+        NSDictionary* serverDesc = nil;
+
+        if (server_uuid) {
+            NSString* uuid = [NSString stringWithUTF8String:server_uuid];
+            for (NSDictionary* desc in servers) {
+                if ([desc[SyphonServerDescriptionUUIDKey] isEqualToString:uuid]) {
+                    serverDesc = desc;
+                    break;
+                }
+            }
+        } else {
+            NSString* name = server_name ? [NSString stringWithUTF8String:server_name] : nil;
+            NSString* app  = app_name ? [NSString stringWithUTF8String:app_name] : nil;
+
+            for (NSDictionary* desc in servers) {
+                BOOL nameMatch = !name || [desc[SyphonServerDescriptionNameKey] isEqualToString:name];
+                BOOL appMatch  = !app  || [desc[SyphonServerDescriptionAppNameKey] isEqualToString:app];
+                if (nameMatch && appMatch) {
+                    serverDesc = desc;
+                    break;
+                }
+            }
+        }
+
+        if (!serverDesc) {
+            NSLog(@"[SyphonReceiver] ERROR: No matching server found");
+            return nullptr;
+        }
+
+        auto* bridge = new SyphonReceiverBridge();
+        bridge->lastWidth = 0;
+        bridge->lastHeight = 0;
+
+        bridge->device = MTLCreateSystemDefaultDevice();
+        if (!bridge->device) {
+            NSLog(@"[SyphonReceiver] ERROR: Failed to create Metal device");
+            delete bridge;
+            return nullptr;
+        }
+
+        bridge->commandQueue = [bridge->device newCommandQueue];
+
+        bridge->client = [[SyphonMetalClient alloc] initWithServerDescription:serverDesc
+                                                                       device:bridge->device
+                                                                      options:nil
+                                                              newFrameHandler:nil];
+
+        if (!bridge->client) {
+            NSLog(@"[SyphonReceiver] ERROR: Failed to create SyphonMetalClient");
+            delete bridge;
+            return nullptr;
+        }
+
+        NSLog(@"[SyphonReceiver] Connected to server: %@ (%@)",
+              serverDesc[SyphonServerDescriptionNameKey],
+              serverDesc[SyphonServerDescriptionAppNameKey]);
+
+        return static_cast<SyphonReceiverHandle>(bridge);
+    }
+}
+
+void syphon_receiver_destroy(SyphonReceiverHandle handle) {
+    if (!handle) return;
+    @autoreleasepool {
+        auto* bridge = static_cast<SyphonReceiverBridge*>(handle);
+        [bridge->client stop];
+        bridge->client       = nil;
+        bridge->commandQueue = nil;
+        bridge->device       = nil;
+        delete bridge;
+    }
+}
+
+int syphon_receiver_has_new_frame(SyphonReceiverHandle handle) {
+    if (!handle) return 0;
+    @autoreleasepool {
+        auto* bridge = static_cast<SyphonReceiverBridge*>(handle);
+        return bridge->client.hasNewFrame ? 1 : 0;
+    }
+}
+
+int syphon_receiver_receive_rgba(SyphonReceiverHandle handle,
+                                  uint8_t* out_buffer, uint32_t buffer_size,
+                                  uint32_t* out_width, uint32_t* out_height) {
+    if (!handle || !out_buffer || !out_width || !out_height) return -1;
+    @autoreleasepool {
+        auto* bridge = static_cast<SyphonReceiverBridge*>(handle);
+
+        id<MTLTexture> texture = [bridge->client newFrameImage];
+        if (!texture) return -1;
+
+        uint32_t w = (uint32_t)texture.width;
+        uint32_t h = (uint32_t)texture.height;
+        uint32_t bytesPerRow = w * 4;
+        uint32_t requiredSize = bytesPerRow * h;
+
+        if (buffer_size < requiredSize) {
+            // Caller needs to know the dimensions to allocate a bigger buffer
+            *out_width = w;
+            *out_height = h;
+            return -1;
+        }
+
+        bridge->lastWidth = w;
+        bridge->lastHeight = h;
+
+        // GPU readback: blit texture contents to a staging buffer
+        id<MTLCommandBuffer> cmdBuf = [bridge->commandQueue commandBuffer];
+        id<MTLBuffer> staging = [bridge->device newBufferWithLength:requiredSize
+                                                            options:MTLResourceStorageModeShared];
+
+        id<MTLBlitCommandEncoder> blit = [cmdBuf blitCommandEncoder];
+        [blit copyFromTexture:texture
+                  sourceSlice:0
+                  sourceLevel:0
+                 sourceOrigin:MTLOriginMake(0, 0, 0)
+                   sourceSize:MTLSizeMake(w, h, 1)
+                     toBuffer:staging
+            destinationOffset:0
+       destinationBytesPerRow:bytesPerRow
+     destinationBytesPerImage:requiredSize];
+        [blit endEncoding];
+        [cmdBuf commit];
+        [cmdBuf waitUntilCompleted];
+
+        // Copy from staging buffer to output
+        memcpy(out_buffer, staging.contents, requiredSize);
+
+        *out_width = w;
+        *out_height = h;
+
+        return 0;
+    }
+}
+
+int syphon_receiver_is_valid(SyphonReceiverHandle handle) {
+    if (!handle) return 0;
+    @autoreleasepool {
+        auto* bridge = static_cast<SyphonReceiverBridge*>(handle);
+        return bridge->client.isValid ? 1 : 0;
+    }
+}
+
+uint32_t syphon_receiver_get_width(SyphonReceiverHandle handle) {
+    if (!handle) return 0;
+    auto* bridge = static_cast<SyphonReceiverBridge*>(handle);
+    return bridge->lastWidth;
+}
+
+uint32_t syphon_receiver_get_height(SyphonReceiverHandle handle) {
+    if (!handle) return 0;
+    auto* bridge = static_cast<SyphonReceiverBridge*>(handle);
+    return bridge->lastHeight;
+}
+
+// ============================================================
+// Discovery (SyphonServerDirectory)
+// ============================================================
+
+char* syphon_discovery_list_servers(void) {
+    @autoreleasepool {
+        SyphonServerDirectory* dir = [SyphonServerDirectory sharedDirectory];
+        NSArray* servers = dir.servers;
+
+        NSMutableArray* result = [NSMutableArray array];
+        for (NSDictionary* desc in servers) {
+            NSMutableDictionary* entry = [NSMutableDictionary dictionary];
+            NSString* name = desc[SyphonServerDescriptionNameKey];
+            if (name) entry[@"name"] = name;
+            else entry[@"name"] = @"";
+
+            NSString* appName = desc[SyphonServerDescriptionAppNameKey];
+            if (appName) entry[@"appName"] = appName;
+
+            NSString* uuid = desc[SyphonServerDescriptionUUIDKey];
+            if (uuid) entry[@"uuid"] = uuid;
+
+            [result addObject:entry];
+        }
+
+        NSError* error = nil;
+        NSData* jsonData = [NSJSONSerialization dataWithJSONObject:result
+                                                           options:0
+                                                             error:&error];
+        if (error || !jsonData) {
+            NSLog(@"[SyphonDiscovery] ERROR: Failed to serialize server list: %@", error);
+            // Return empty array as fallback
+            char* empty = strdup("[]");
+            return empty;
+        }
+
+        NSString* jsonStr = [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
+        return strdup([jsonStr UTF8String]);
+    }
+}
+
+void syphon_discovery_free_string(char* str) {
+    if (str) free(str);
+}
+
 } // extern "C"

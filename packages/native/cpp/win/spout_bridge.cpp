@@ -125,4 +125,171 @@ int32_t spout_bridge_resize(void* handle, uint32_t width, uint32_t height) {
     return 0;
 }
 
+// ============================================================
+// Receiver
+// ============================================================
+
+struct SpoutReceiverBridge {
+    spoutDX receiver;
+    ID3D11Device* device;
+    ID3D11DeviceContext* context;
+    ID3D11Texture2D* staging;
+    unsigned int width;
+    unsigned int height;
+    bool connected;
+    char senderName[256];
+};
+
+void* spout_receiver_create(const char* sender_name) {
+    SpoutReceiverBridge* bridge = new SpoutReceiverBridge();
+    bridge->device = nullptr;
+    bridge->context = nullptr;
+    bridge->staging = nullptr;
+    bridge->width = 0;
+    bridge->height = 0;
+    bridge->connected = false;
+    memset(bridge->senderName, 0, sizeof(bridge->senderName));
+
+    if (sender_name && sender_name[0]) {
+        strncpy(bridge->senderName, sender_name, sizeof(bridge->senderName) - 1);
+    }
+
+    // Initialize DirectX 11
+    if (!bridge->receiver.OpenDirectX11()) {
+        delete bridge;
+        return nullptr;
+    }
+
+    bridge->device = bridge->receiver.GetDX11Device();
+    bridge->context = bridge->receiver.GetDX11Context();
+
+    // Set the sender name to connect to (empty = first available)
+    bridge->receiver.SetReceiverName(bridge->senderName);
+
+    return bridge;
+}
+
+void spout_receiver_destroy(void* handle) {
+    if (!handle) return;
+
+    SpoutReceiverBridge* bridge = static_cast<SpoutReceiverBridge*>(handle);
+    bridge->receiver.ReleaseReceiver();
+    if (bridge->staging) {
+        bridge->staging->Release();
+        bridge->staging = nullptr;
+    }
+    bridge->receiver.CloseDirectX11();
+    delete bridge;
+}
+
+int32_t spout_receiver_has_new_frame(void* handle) {
+    if (!handle) return 0;
+    SpoutReceiverBridge* bridge = static_cast<SpoutReceiverBridge*>(handle);
+    return bridge->receiver.IsFrameNew() ? 1 : 0;
+}
+
+// Helper: ensure staging texture matches current dimensions
+static bool ensure_staging(SpoutReceiverBridge* bridge, uint32_t w, uint32_t h) {
+    if (bridge->staging && bridge->width == w && bridge->height == h) {
+        return true;
+    }
+    if (bridge->staging) {
+        bridge->staging->Release();
+        bridge->staging = nullptr;
+    }
+
+    D3D11_TEXTURE2D_DESC desc = {};
+    desc.Width = w;
+    desc.Height = h;
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_STAGING;
+    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+
+    HRESULT hr = bridge->device->CreateTexture2D(&desc, nullptr, &bridge->staging);
+    return SUCCEEDED(hr) && bridge->staging;
+}
+
+int32_t spout_receiver_receive_rgba(void* handle,
+                                     uint8_t* out_buffer, uint32_t buffer_size,
+                                     uint32_t* out_width, uint32_t* out_height) {
+    if (!handle || !out_buffer || !out_width || !out_height) return -1;
+
+    SpoutReceiverBridge* bridge = static_cast<SpoutReceiverBridge*>(handle);
+
+    // ReceiveTexture with null texture to just trigger connection/update
+    unsigned int w = 0, h = 0;
+    if (!bridge->receiver.ReceiveTexture()) {
+        return -1;
+    }
+
+    w = bridge->receiver.GetSenderWidth();
+    h = bridge->receiver.GetSenderHeight();
+    if (w == 0 || h == 0) return -1;
+
+    bridge->connected = true;
+    bridge->width = w;
+    bridge->height = h;
+    *out_width = w;
+    *out_height = h;
+
+    uint32_t requiredSize = w * h * 4;
+    if (buffer_size < requiredSize) return -1;
+
+    // Use Spout's built-in ReceiveImage to get pixel data
+    // ReceiveImage copies to a pixel buffer directly
+    if (!bridge->receiver.ReceiveImage(out_buffer, GL_RGBA)) {
+        return -1;
+    }
+
+    return 0;
+}
+
+int32_t spout_receiver_is_connected(void* handle) {
+    if (!handle) return 0;
+    SpoutReceiverBridge* bridge = static_cast<SpoutReceiverBridge*>(handle);
+    return bridge->receiver.IsConnected() ? 1 : 0;
+}
+
+uint32_t spout_receiver_get_width(void* handle) {
+    if (!handle) return 0;
+    SpoutReceiverBridge* bridge = static_cast<SpoutReceiverBridge*>(handle);
+    return bridge->width;
+}
+
+uint32_t spout_receiver_get_height(void* handle) {
+    if (!handle) return 0;
+    SpoutReceiverBridge* bridge = static_cast<SpoutReceiverBridge*>(handle);
+    return bridge->height;
+}
+
+// ============================================================
+// Discovery
+// ============================================================
+
+int32_t spout_discovery_get_sender_count(void) {
+    spoutDX spout;
+    return spout.GetSenderCount();
+}
+
+// Get sender name by index. Returns 0 on success, -1 on error.
+// out_name must be at least 256 bytes.
+int32_t spout_discovery_get_sender_name(int32_t index, char* out_name, uint32_t name_size) {
+    if (!out_name || name_size < 256) return -1;
+
+    spoutDX spout;
+    char name[256];
+    memset(name, 0, sizeof(name));
+
+    if (!spout.GetSenderName(index, name)) {
+        return -1;
+    }
+
+    strncpy(out_name, name, name_size - 1);
+    out_name[name_size - 1] = '\0';
+    return 0;
+}
+
 } // extern "C"
