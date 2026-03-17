@@ -3,13 +3,15 @@
 [![CI](https://github.com/naporin0624/electron-texture-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/naporin0624/electron-texture-bridge/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-**GPU zero-copy texture sharing from Electron to VJ software via Spout / Syphon Metal.**
+**Bidirectional GPU texture sharing between Electron and VJ software via Spout / Syphon Metal.**
 
 [日本語](lang/ja/README.md)
 
-A napi-rs native addon that captures GPU textures from Electron's offscreen rendering (`useSharedTexture`) and shares them with external applications like Resolume Arena, VDMX, OBS, TouchDesigner, and other Syphon/Spout-compatible receivers — all without CPU readback.
+A napi-rs native addon for bidirectional GPU texture sharing with Electron. **Send** textures from Electron's offscreen rendering (`useSharedTexture`) to VJ software, or **receive** textures from external Syphon/Spout servers into your Electron app. Works with Resolume Arena, VDMX, OBS, TouchDesigner, and other Syphon/Spout-compatible applications.
 
 ## Architecture
+
+### Sending (Electron → VJ Software)
 
 ```
 [Web Worker]              [Chromium GPU Process]         [Native Addon]         [External Apps]
@@ -17,16 +19,28 @@ A napi-rs native addon that captures GPU textures from Electron's offscreen rend
  OffscreenCanvas          Shared Texture (GPU)            Spout / Syphon        VDMX, OBS, etc.
 ```
 
-The entire pipeline stays on the GPU. No CPU readback. Sub-frame latency.
+The entire send pipeline stays on the GPU. No CPU readback. Sub-frame latency.
+
+### Receiving (VJ Software → Electron)
+
+```
+[External Apps]          [Native Addon]                  [Electron App]
+ Resolume Arena   ──→    texture-bridge   ──→ RGBA buf ──→  Process frames
+ VDMX, OBS, etc.         Syphon Client / Spout Receiver     Display, analyze, etc.
+```
+
+Receiving involves GPU→CPU readback (Metal blit / D3D11 staging) to provide RGBA pixel data.
 
 ## Features
 
-- **GPU Zero-Copy**: Textures are shared directly on the GPU via IOSurface (macOS) or DXGI Shared Handle (Windows)
+- **GPU Zero-Copy Sending**: Textures are shared directly on the GPU via IOSurface (macOS) or DXGI Shared Handle (Windows)
+- **Texture Receiving**: Pull textures from external Syphon/Spout servers as RGBA buffers
+- **Sender Discovery**: Enumerate available Syphon servers / Spout senders with real-time change events
 - **Cross-Platform**: Syphon Metal on macOS, Spout on Windows
 - **Electron Native**: Built for Electron 40+'s `useSharedTexture` paint event API
 - **WebGPU Preview**: Optional zero-copy preview window using `importExternalTexture`
-- **Factory API**: `createTextureBridge()` handles all boilerplate — offscreen window, paint events, preview, FPS tracking
-- **Low-Level API**: `sendTextureFromPaintEvent()` for full control over the pipeline
+- **Factory APIs**: `createTextureBridge()` for sending, `createTextureReceiver()` for receiving — handle all boilerplate
+- **Low-Level API**: `sendTextureFromPaintEvent()` and `TextureReceiver` for full control
 - **napi-rs**: Type-safe Rust → Node.js bindings with prebuilt binaries
 
 ## Supported Platforms
@@ -151,6 +165,42 @@ app.whenReady().then(async () => {
 </script>
 ```
 
+### Receiving: Factory API
+
+Pull textures from external Syphon/Spout servers into your Electron app.
+
+```typescript
+// main process
+import { app } from "electron";
+import { createTextureReceiver, SenderDiscovery } from "@napolab/texture-bridge-renderer";
+
+app.whenReady().then(() => {
+  // Discover available servers
+  const discovery = new SenderDiscovery();
+  discovery.on("added", (senders) => {
+    console.log("New senders:", senders);
+  });
+  discovery.start(1000); // Poll every second
+
+  // Receive from a specific server
+  const receiver = createTextureReceiver({
+    senderName: "Resolume Arena",
+  });
+
+  receiver.on("frame", (frame) => {
+    // frame: { data: Buffer, width: number, height: number }
+    console.log(`Received ${frame.width}x${frame.height} frame`);
+  });
+
+  receiver.on("fps", (fps) => console.log(`Receive FPS: ${fps.toFixed(1)}`));
+  receiver.start();
+
+  // Clean up
+  // receiver.dispose();
+  // discovery.dispose();
+});
+```
+
 ### Low-Level: Core API
 
 For full control over the pipeline, use `@napolab/texture-bridge-core` directly.
@@ -247,6 +297,62 @@ createWorkerRenderer({
 });
 ```
 
+#### `createTextureReceiver(options): TextureReceiverBridge`
+
+Factory function that creates a texture receiver with polling and FPS tracking.
+
+```typescript
+interface TextureReceiverBridgeOptions {
+  senderName: string;      // Syphon server name / Spout sender name
+  appName?: string;        // (macOS only) Filter by application name
+  serverUuid?: string;     // (macOS only) Connect by server UUID
+  pollIntervalMs?: number; // Frame polling interval in ms (default: 16)
+}
+```
+
+#### `TextureReceiverBridge`
+
+```typescript
+interface TextureReceiverBridge {
+  on(event: "frame", listener: (frame: ReceivedFrame) => void): this;
+  on(event: "fps", listener: (fps: number) => void): this;
+  on(event: "error", listener: (error: Error) => void): this;
+  on(event: "disposed", listener: () => void): this;
+
+  start(): void;   // Begin polling for frames
+  stop(): void;    // Pause polling
+  dispose(): void; // Release all resources
+
+  readonly isDisposed: boolean;
+}
+
+interface ReceivedFrame {
+  data: Buffer;    // RGBA pixel data
+  width: number;
+  height: number;
+}
+```
+
+#### `SenderDiscovery`
+
+EventEmitter that polls for available Syphon servers / Spout senders and emits diff events.
+
+```typescript
+const discovery = new SenderDiscovery();
+discovery.on("added", (senders: SenderInfo[]) => { /* new senders appeared */ });
+discovery.on("removed", (senders: SenderInfo[]) => { /* senders disappeared */ });
+discovery.on("updated", (senders: SenderInfo[]) => { /* full current list */ });
+discovery.start(1000); // Poll interval in ms
+discovery.getSenders(); // Current sender list
+discovery.dispose();
+
+interface SenderInfo {
+  name: string;
+  appName?: string;  // macOS only
+  uuid?: string;     // macOS only
+}
+```
+
 #### Worker Protocol Types (from `renderer/worker`)
 
 ```typescript
@@ -286,6 +392,29 @@ class TextureSender {
 }
 ```
 
+#### `TextureReceiver`
+
+Native class for receiving textures from Syphon/Spout senders.
+
+```typescript
+class TextureReceiver {
+  constructor(senderName: string, appName?: string, serverUuid?: string);
+  hasNewFrame(): boolean;
+  receiveFrame(): ReceivedFrame | null;  // { data: Buffer, width, height }
+  isConnected(): boolean;
+  getWidth(): number;
+  getHeight(): number;
+  platform(): string;
+  stop(): void;
+}
+```
+
+#### `listSenders()`
+
+```typescript
+function listSenders(): Array<{ name: string; appName?: string; uuid?: string }>;
+```
+
 #### `getPlatform()`
 
 ```typescript
@@ -317,11 +446,20 @@ type Platform = "spout" | "syphon-metal" | "unsupported";
 
 ## Performance
 
+### Sending
+
 | Path | GPU Copies | Latency | Memory |
 |------|-----------|---------|--------|
 | Syphon / Spout | 0 (zero-copy) | < 1 frame | Shared GPU memory |
 | WebGPU Preview | 0 (zero-copy) | < 1 frame | Shared GPU memory |
 | RGBA Buffer (fallback) | 1 (CPU → GPU) | 2-3 frames | CPU + GPU |
+
+### Receiving
+
+| Resolution | Bandwidth | Notes |
+|-----------|-----------|-------|
+| 1080p @ 60fps | ~500 MB/s | GPU→CPU readback via Metal blit / D3D11 staging |
+| 4K @ 60fps | ~2 GB/s | Consider reducing poll rate or resolution |
 
 ## Example Application
 
@@ -356,23 +494,25 @@ electron-texture-bridge/
 ├── packages/
 │   ├── native/                # @napolab/texture-bridge (napi-rs)
 │   │   ├── src/
-│   │   │   ├── lib.rs         # napi-rs entry point, TextureSender API
+│   │   │   ├── lib.rs         # napi-rs entry point, TextureSender/Receiver API
 │   │   │   ├── types.rs       # RawTextureHandle type alias
-│   │   │   ├── mac/           # macOS: Syphon Metal sender + FFI
-│   │   │   └── win/           # Windows: Spout sender + FFI
+│   │   │   ├── mac/           # macOS: Syphon Metal sender + receiver + FFI
+│   │   │   └── win/           # Windows: Spout sender + receiver + FFI
 │   │   ├── cpp/
-│   │   │   ├── mac/           # ObjC++ Syphon Metal bridge
-│   │   │   └── win/           # C++ Spout bridge
+│   │   │   ├── mac/           # ObjC++ Syphon Metal bridge (send + receive + discovery)
+│   │   │   └── win/           # C++ Spout bridge (send + receive + discovery)
 │   │   ├── build.rs           # Platform-specific build configuration
 │   │   └── Cargo.toml
 │   ├── core/                  # @napolab/texture-bridge-core (TypeScript)
 │   │   └── src/
-│   │       ├── index.ts       # sendTextureFromPaintEvent + re-exports
-│   │       └── types.ts       # TextureInfo, PaintTexture types
+│   │       ├── index.ts       # sendTextureFromPaintEvent + re-exports (sender + receiver)
+│   │       └── types.ts       # TextureInfo, PaintTexture, SenderInfo, ReceivedFrame
 │   ├── renderer/              # @napolab/texture-bridge-renderer (TypeScript)
 │   │   └── src/
-│   │       ├── index.ts       # createTextureBridge factory
-│   │       ├── bridge.ts      # Factory implementation (EventEmitter)
+│   │       ├── index.ts       # createTextureBridge + createTextureReceiver + SenderDiscovery
+│   │       ├── bridge.ts      # Sender factory implementation (EventEmitter)
+│   │       ├── receiver.ts    # Receiver factory (polling + FPS tracking)
+│   │       ├── discovery.ts   # SenderDiscovery (polling + diff events)
 │   │       ├── types.ts       # TextureBridgeOptions, TextureBridge
 │   │       ├── preview-manager.ts  # Preview window lifecycle
 │   │       ├── fps-counter.ts # FPS measurement utility
