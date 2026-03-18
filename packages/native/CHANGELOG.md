@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/naporin0624/electron-texture-bridge/compare/native-v0.4.1...native-v0.5.0) (2026-03-18)
+
+
+### Features
+
+* add TextureReceiver and listSenders API for Syphon/Spout ([#13](https://github.com/naporin0624/electron-texture-bridge/issues/13)) ([9bbfb54](https://github.com/naporin0624/electron-texture-bridge/commit/9bbfb54dd2b89f7fd621a45f4cd57ddbfb44c4e6))
+
 ## [0.4.1](https://github.com/naporin0624/electron-texture-bridge/compare/native-v0.4.0...native-v0.4.1) (2026-02-14)
 
 
