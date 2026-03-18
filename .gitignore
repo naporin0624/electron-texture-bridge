@@ -23,4 +23,4 @@ packages/renderer/dist/
 
 # claude-mem plugin context files (keep root CLAUDE.md)
 **/CLAUDE.md
-!CLAUDE.md
+!/CLAUDE.md

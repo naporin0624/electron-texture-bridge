@@ -6,8 +6,8 @@
     "build:renderer": "pnpm --filter @napolab/texture-bridge-renderer run build",
     "build": "pnpm run build:native && pnpm run build:core && pnpm run build:renderer",
     "dev:example": "pnpm --filter @napolab/texture-bridge-example run dev",
-    "lint": "oxfmt --check packages/*/src && oxlint packages/*/src",
-    "fmt": "oxfmt --write packages/*/src",
+    "lint": "oxfmt --check --ignore-path .gitignore packages/*/src && oxlint packages/*/src",
+    "fmt": "oxfmt --write --ignore-path .gitignore packages/*/src",
     "test": "pnpm -r --filter '!@napolab/texture-bridge' --filter '!@napolab/texture-bridge-example' run test",
     "typecheck": "pnpm -r --filter '!@napolab/texture-bridge' run typecheck",
     "prepare": "husky"
