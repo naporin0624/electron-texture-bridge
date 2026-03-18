@@ -33,7 +33,10 @@ export interface TextureReceiverBridge {
 
   start(): void;
   stop(): void;
+  /** Tear down all resources. Terminal operation — the bridge cannot be reused afterward. */
   dispose(): void;
+  /** Alias for dispose(), enabling `using receiver = createTextureReceiver(...)` */
+  [Symbol.dispose](): void;
   readonly isDisposed: boolean;
 }
 
@@ -74,6 +77,10 @@ class TextureReceiverBridgeImpl extends EventEmitter implements TextureReceiverB
     this.receiver.stop();
     this.emit("disposed");
     this.removeAllListeners();
+  }
+
+  [Symbol.dispose](): void {
+    this.dispose();
   }
 
   private _poll(): void {

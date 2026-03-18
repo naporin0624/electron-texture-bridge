@@ -160,6 +160,74 @@ describe("TextureReceiverBridge", () => {
     bridge.dispose();
   });
 
+  it("dispose() emits 'disposed' event", () => {
+    const handler = vi.fn();
+    const bridge = createTextureReceiver({ senderName: "TestSender" });
+    bridge.on("disposed", handler);
+
+    bridge.dispose();
+
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
+  it("start() is a no-op after dispose()", () => {
+    const bridge = createTextureReceiver({ senderName: "TestSender" });
+    bridge.dispose();
+
+    // start() after dispose should not begin polling
+    bridge.start();
+    mockReceiver.hasNewFrame.mockReturnValue(true);
+    vi.advanceTimersByTime(100);
+    expect(mockReceiver.hasNewFrame).not.toHaveBeenCalled();
+  });
+
+  it("emits 'error' when stopped receiver throws during poll", () => {
+    const handler = vi.fn();
+    const bridge = createTextureReceiver({ senderName: "TestSender" });
+    bridge.on("error", handler);
+    bridge.start();
+
+    // Simulate a stopped receiver that throws on hasNewFrame
+    mockReceiver.hasNewFrame.mockImplementation(() => {
+      throw new Error("TextureReceiver has been stopped");
+    });
+
+    vi.advanceTimersByTime(20);
+
+    expect(handler).toHaveBeenCalled();
+    expect(handler.mock.calls[0][0].message).toBe("TextureReceiver has been stopped");
+
+    bridge.dispose();
+  });
+
+  it("[Symbol.dispose]() delegates to dispose()", () => {
+    const bridge = createTextureReceiver({ senderName: "TestSender" });
+    bridge.start();
+
+    bridge[Symbol.dispose]();
+
+    expect(bridge.isDisposed).toBe(true);
+    expect(mockReceiver.stop).toHaveBeenCalledTimes(1);
+  });
+
+  it("[Symbol.dispose]() followed by explicit dispose() is safe", () => {
+    const bridge = createTextureReceiver({ senderName: "TestSender" });
+
+    bridge[Symbol.dispose]();
+    bridge.dispose(); // should not throw
+
+    expect(mockReceiver.stop).toHaveBeenCalledTimes(1);
+  });
+
+  it("explicit dispose() followed by [Symbol.dispose]() is safe", () => {
+    const bridge = createTextureReceiver({ senderName: "TestSender" });
+
+    bridge.dispose();
+    bridge[Symbol.dispose](); // should not throw
+
+    expect(mockReceiver.stop).toHaveBeenCalledTimes(1);
+  });
+
   it("emits 'error' when receiveFrame throws", () => {
     const handler = vi.fn();
     const bridge = createTextureReceiver({ senderName: "TestSender" });
