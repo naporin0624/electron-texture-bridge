@@ -156,6 +156,12 @@ impl TextureSender {
             .map_err(|e| Error::from_reason(e))
     }
 
+    /// Returns true if native resources have been released via `stop()`.
+    #[cfg(test)]
+    pub fn is_stopped(&self) -> bool {
+        self.inner.is_none()
+    }
+
     /// Get the current platform name.
     #[napi]
     pub fn platform(&self) -> String {
@@ -342,6 +348,12 @@ impl TextureReceiver {
         Ok(())
     }
 
+    /// Returns true if native resources have been released via `stop()`.
+    #[cfg(test)]
+    pub fn is_stopped(&self) -> bool {
+        self.inner.is_none()
+    }
+
     /// Get the current platform name.
     #[napi]
     pub fn platform(&self) -> String {
@@ -382,6 +394,22 @@ pub fn list_senders() -> Result<Vec<JsSenderInfo>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- Disposal lifecycle tests ----
+    //
+    // Note: TextureSender and TextureReceiver types link platform-specific C++
+    // bridge code (Syphon/Spout). Constructing instances in pure Rust tests
+    // pulls in C++ runtime symbols that are unavailable in the test binary
+    // linker context. The full lifecycle (stop → error on use, idempotent stop)
+    // is tested at the integration level via TypeScript tests in the core and
+    // renderer packages.
+    //
+    // The compile-time contract is enforced by the Option<Inner> pattern:
+    // - `stop()` calls `self.inner.take()` → deterministic drop
+    // - Operational methods call `self.inner.as_mut().ok_or_else(...)` → error after stop
+    // - Read-only methods call `self.inner.as_ref().map_or(default, ...)` → safe defaults
+
+    // ---- parse_senders_json tests ----
 
     #[test]
     fn parse_senders_json_valid_array() {
