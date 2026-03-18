@@ -2,21 +2,18 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockSend = vi.fn();
 const mockSendSurface = vi.fn();
+const mockStop = vi.fn();
 
 vi.mock("@napolab/texture-bridge", () => ({
   TextureSender: class MockTextureSender {
     send = mockSend;
     sendSurface = mockSendSurface;
-    stop() {
-      this.send = () => {
-        throw new Error("TextureSender has been stopped");
-      };
-      this.sendSurface = () => {
-        throw new Error("TextureSender has been stopped");
-      };
-    }
+    stop = mockStop;
+    constructor(_name?: string, _width?: number, _height?: number) {}
   },
-  TextureReceiver: class MockTextureReceiver {},
+  TextureReceiver: class MockTextureReceiver {
+    constructor(_name?: string, _app?: string, _uuid?: string) {}
+  },
   getPlatform: () => "mock-platform",
   listSenders: () => [{ name: "TestSender", appName: "TestApp", uuid: "test-uuid" }],
 }));
@@ -64,6 +61,7 @@ describe("sendTextureFromPaintEvent", () => {
     vi.clearAllMocks();
     mockSend.mockReset();
     mockSendSurface.mockReset();
+    mockStop.mockReset();
   });
 
   it("calls sender.sendSurface on darwin with valid ioSurface", async () => {
@@ -72,7 +70,7 @@ describe("sendTextureFromPaintEvent", () => {
 
     try {
       const { sendTextureFromPaintEvent, TextureSender } = await import("../index");
-      const sender = new TextureSender();
+      const sender = new TextureSender("Test", 1920, 1080);
 
       const textureInfo = {
         pixelFormat: "bgra" as const,
@@ -90,7 +88,7 @@ describe("sendTextureFromPaintEvent", () => {
 
   it("does nothing when textureInfo is undefined", async () => {
     const { sendTextureFromPaintEvent, TextureSender } = await import("../index");
-    const sender = new TextureSender();
+    const sender = new TextureSender("Test", 1920, 1080);
 
     // Should not throw
     sendTextureFromPaintEvent(sender, undefined);
@@ -104,7 +102,12 @@ describe("sendTextureFromPaintEvent", () => {
 
     try {
       const { sendTextureFromPaintEvent, TextureSender } = await import("../index");
-      const sender = new TextureSender();
+      const sender = new TextureSender("Test", 1920, 1080);
+
+      // After stop(), sendSurface should throw
+      mockSendSurface.mockImplementation(() => {
+        throw new Error("TextureSender has been stopped");
+      });
       sender.stop();
 
       const textureInfo = {
