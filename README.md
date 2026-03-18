@@ -603,6 +603,67 @@ win.webContents.on("paint", (event) => {
 });
 ```
 
+## Migration: Explicit Disposal (v0.6+)
+
+Starting from v0.6, `stop()` and `dispose()` are **terminal operations** that immediately release native GPU/IPC resources. Previously, resource cleanup depended on JavaScript garbage collection timing.
+
+### What changed
+
+| Behavior | Before (v0.5) | After (v0.6+) |
+|----------|---------------|---------------|
+| `sender.stop()` | No-op (GC handles cleanup) | Drops native resources immediately |
+| `sender.send()` after `stop()` | Silently worked | Throws `"TextureSender has been stopped"` |
+| `receiver.receiveFrame()` after `stop()` | Returned stale/null | Returns `null` |
+| `receiver.hasNewFrame()` after `stop()` | Returned stale value | Returns `false` |
+| `bridge.dispose()` | Stopped timers only | Fully tears down native sender + preview |
+
+### How to migrate
+
+**Sender** — always pair with explicit teardown:
+
+```typescript
+const sender = new TextureSender("MyApp", 1920, 1080);
+try {
+  sender.send(handle, w, h);
+} finally {
+  sender.stop(); // resources released immediately
+}
+```
+
+**Receiver** — same pattern:
+
+```typescript
+const receiver = new TextureReceiver("MySender");
+try {
+  const frame = receiver.receiveFrame();
+} finally {
+  receiver.stop();
+}
+```
+
+**High-level bridge** — no code changes needed if you already call `dispose()`:
+
+```typescript
+const bridge = await createTextureBridge({ ... });
+// ... use bridge ...
+bridge.dispose(); // now deterministic
+```
+
+**`using` declarations** (Node.js 22+, `"lib": ["ESNext.Disposable"]`):
+
+```typescript
+// Import from @napolab/texture-bridge-core for Symbol.dispose support
+using sender = new TextureSender("MyApp", 1920, 1080);
+// resources automatically released at end of scope
+```
+
+### Key rules
+
+1. Once `stop()` or `dispose()` is called, the instance is permanently closed
+2. Repeated `stop()` / `dispose()` calls are safe (idempotent)
+3. Do not reuse stopped instances — create a new one instead
+4. Do not rely on GC to release native resources
+
 ## CI/CD
 
 GitHub Actions builds native binaries for all supported platforms:
