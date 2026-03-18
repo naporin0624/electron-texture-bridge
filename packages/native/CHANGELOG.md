@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/naporin0624/electron-texture-bridge/compare/native-v0.5.0...native-v0.5.1) (2026-03-18)
+
+
+### Bug Fixes
+
+* **native:** add rpath for CARGO_BUILD_TARGET cross-compile test binaries ([#16](https://github.com/naporin0624/electron-texture-bridge/issues/16)) ([571498c](https://github.com/naporin0624/electron-texture-bridge/commit/571498c9d5659dd6002612dbd300a64a4dbff0cf))
+
 ## [0.5.0](https://github.com/naporin0624/electron-texture-bridge/compare/native-v0.4.1...native-v0.5.0) (2026-03-18)
 
 

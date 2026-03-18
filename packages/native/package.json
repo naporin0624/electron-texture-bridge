@@ -1,6 +1,6 @@
 {
   "name": "@napolab/texture-bridge",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Native bindings for cross-platform GPU texture sharing (Spout/Syphon)",
   "main": "index.js",
   "types": "index.d.ts",

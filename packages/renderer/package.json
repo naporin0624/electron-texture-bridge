@@ -1,6 +1,6 @@
 {
   "name": "@napolab/texture-bridge-renderer",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "High-level factory API for GPU texture bridge (BrowserWindow + Preview + Sender)",
   "main": "./dist/index.cjs",
   "module": "./dist/index.mjs",

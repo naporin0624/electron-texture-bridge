@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.5.1](https://github.com/naporin0624/electron-texture-bridge/compare/core-v0.5.0...core-v0.5.1) (2026-03-18)
+
+
+### Miscellaneous Chores
+
+* **core:** Synchronize electron-texture-bridge versions
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @napolab/texture-bridge bumped to 0.5.1
+
 ## [0.5.0](https://github.com/naporin0624/electron-texture-bridge/compare/core-v0.4.1...core-v0.5.0) (2026-03-18)
 
 
