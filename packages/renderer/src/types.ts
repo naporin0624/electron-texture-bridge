@@ -57,6 +57,9 @@ export interface TextureBridge {
   /** Whether the bridge has been disposed */
   readonly isDisposed: boolean;
 
-  /** Tear down all resources */
+  /** Tear down all resources. Terminal operation — the bridge cannot be reused afterward. */
   dispose(): void;
+
+  /** Alias for dispose(), enabling `using bridge = await createTextureBridge(...)` */
+  [Symbol.dispose](): void;
 }

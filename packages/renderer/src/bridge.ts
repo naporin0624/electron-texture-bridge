@@ -46,6 +46,29 @@ class TextureBridgeImpl extends EventEmitter implements TextureBridge {
     return this._disposed;
   }
 
+  /** Handle a paint event from the offscreen BrowserWindow. */
+  handlePaint(event: PaintEvent): void {
+    if (this._disposed) return;
+
+    const texture = event.texture;
+    if (!texture?.textureInfo) return;
+
+    try {
+      sendTextureFromPaintEvent(this.sender, texture.textureInfo);
+      this.previewManager?.sendFrame(texture);
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      this.emit("error", error);
+    } finally {
+      texture.release?.();
+    }
+
+    const fps = this.fpsCounter.tick();
+    if (fps !== null) {
+      this.emit("fps", fps);
+    }
+  }
+
   openPreview(): void {
     if (this._disposed) return;
     if (!this.previewManager) {
@@ -96,6 +119,10 @@ class TextureBridgeImpl extends EventEmitter implements TextureBridge {
     this.emit("disposed");
     this.removeAllListeners();
   }
+
+  [Symbol.dispose](): void {
+    this.dispose();
+  }
 }
 
 /**
@@ -137,25 +164,9 @@ export async function createTextureBridge(options: TextureBridgeOptions): Promis
   // ---- Bridge instance ----
   const bridge = new TextureBridgeImpl(renderWindow, sender, previewManager, options);
 
-  // ---- Paint handler ----
+  // ---- Paint handler (delegates to instance method, no private field access) ----
   renderWindow.webContents.on("paint", (event: PaintEvent) => {
-    const texture = event.texture;
-    if (!texture?.textureInfo) return;
-
-    try {
-      sendTextureFromPaintEvent((bridge as any).sender, texture.textureInfo);
-      (bridge as any).previewManager?.sendFrame(texture);
-    } catch (err) {
-      const error = err instanceof Error ? err : new Error(String(err));
-      bridge.emit("error", error);
-    } finally {
-      texture.release?.();
-    }
-
-    const fps = (bridge as any).fpsCounter.tick();
-    if (fps !== null) {
-      bridge.emit("fps", fps);
-    }
+    bridge.handlePaint(event);
   });
 
   renderWindow.webContents.setFrameRate(frameRate);
