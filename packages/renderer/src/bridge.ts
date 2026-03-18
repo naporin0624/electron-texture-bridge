@@ -88,6 +88,7 @@ class TextureBridgeImpl extends EventEmitter implements TextureBridge {
   resize(width: number, height: number): void {
     if (this._disposed) return;
 
+    const prevOpts = this.options;
     this.options = { ...this.options, width, height };
 
     // 1. Resize offscreen BrowserWindow
@@ -96,11 +97,11 @@ class TextureBridgeImpl extends EventEmitter implements TextureBridge {
     // 2. Recreate native sender with new dimensions.
     //    Must stop the old sender first — Spout requires unique sender names.
     //    If the new sender fails, restore one with the original dimensions.
-    const prevOpts = this.options;
     this.sender.stop();
     try {
       this.sender = new TextureSender(this.options.name, width, height);
     } catch (err) {
+      this.options = prevOpts;
       this.sender = new TextureSender(prevOpts.name, prevOpts.width, prevOpts.height);
       throw err;
     }
