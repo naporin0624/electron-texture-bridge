@@ -78,7 +78,7 @@ export declare class TextureReceiver {
   hasNewFrame(): boolean
   /**
    * Receive the current frame as RGBA pixel data.
-   * Returns null if no frame is available.
+   * Returns null if no frame is available or if stop() has been called.
    */
   receiveFrame(): ReceivedFrame | null
   /** Returns true if the receiver has a valid connection to a server. */
@@ -87,7 +87,10 @@ export declare class TextureReceiver {
   getWidth(): number
   /** Get the height of the last received texture. */
   getHeight(): number
-  /** Stop the receiver and release resources. */
+  /**
+   * Stop the receiver and release native resources immediately.
+   * After calling this, has_new_frame() returns false and receive_frame() returns null.
+   */
   stop(): void
   /** Get the current platform name. */
   platform(): string
