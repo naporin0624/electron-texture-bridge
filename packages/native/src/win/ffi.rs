@@ -30,6 +30,10 @@ extern "C" {
         out_name: *mut c_char,
         name_size: u32,
     ) -> i32;
+
+    // ---- Consolidated Discovery ----
+    pub fn spout_discovery_list_senders() -> *mut c_char;
+    pub fn spout_discovery_free_string(str: *mut c_char);
 }
 
 pub type SpoutReceiverHandle = *mut std::ffi::c_void;

@@ -2,7 +2,9 @@
 // C++ bridge for Rust FFI to Spout2 SDK
 
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
+#include <string>
 #include <d3d11_1.h>
 #include "SpoutDX.h"
 
@@ -188,12 +190,15 @@ int32_t spout_receiver_has_new_frame(void* handle) {
     return bridge->receiver.IsFrameNew() ? 1 : 0;
 }
 
-// Helper: ensure staging texture matches current dimensions
+// Helper: ensure staging texture matches current dimensions.
+// Checks actual texture desc (not cached bridge dimensions) to avoid stale size bugs.
 static bool ensure_staging(SpoutReceiverBridge* bridge, uint32_t w, uint32_t h) {
-    if (bridge->staging && bridge->width == w && bridge->height == h) {
-        return true;
-    }
     if (bridge->staging) {
+        D3D11_TEXTURE2D_DESC existing = {};
+        bridge->staging->GetDesc(&existing);
+        if (existing.Width == w && existing.Height == h) {
+            return true;
+        }
         bridge->staging->Release();
         bridge->staging = nullptr;
     }
@@ -219,31 +224,60 @@ int32_t spout_receiver_receive_rgba(void* handle,
 
     SpoutReceiverBridge* bridge = static_cast<SpoutReceiverBridge*>(handle);
 
-    // ReceiveTexture with null texture to just trigger connection/update
-    unsigned int w = 0, h = 0;
+    // Single ReceiveTexture() call to update connection state and dimensions.
+    // Do NOT call ReceiveTexture() twice — it has frame-consume semantics.
     if (!bridge->receiver.ReceiveTexture()) {
         return -1;
     }
 
-    w = bridge->receiver.GetSenderWidth();
-    h = bridge->receiver.GetSenderHeight();
+    unsigned int w = bridge->receiver.GetSenderWidth();
+    unsigned int h = bridge->receiver.GetSenderHeight();
     if (w == 0 || h == 0) return -1;
 
     bridge->connected = true;
     bridge->width = w;
     bridge->height = h;
+
+    // Must set out dimensions BEFORE the buffer size check —
+    // caller uses these to allocate the correct buffer on retry.
     *out_width = w;
     *out_height = h;
 
     uint32_t requiredSize = w * h * 4;
-    if (buffer_size < requiredSize) return -1;
-
-    // Use Spout's built-in ReceiveImage to get pixel data
-    // ReceiveImage copies to a pixel buffer directly
-    if (!bridge->receiver.ReceiveImage(out_buffer, GL_RGBA)) {
+    if (buffer_size < requiredSize) {
         return -1;
     }
 
+    // Ensure staging texture matches current dimensions
+    if (!ensure_staging(bridge, w, h)) {
+        return -1;
+    }
+
+    // Get spoutDX's internal shared texture via double-pointer API.
+    // ReceiveTexture(&pTexture) provides access to the already-received frame.
+    ID3D11Texture2D* sharedTexture = nullptr;
+    if (!bridge->receiver.ReceiveTexture(&sharedTexture) || !sharedTexture) {
+        return -1;
+    }
+
+    // Copy shared texture to staging texture (GPU → GPU)
+    bridge->context->CopyResource(bridge->staging, sharedTexture);
+
+    // Map staging texture for CPU read (GPU → CPU readback)
+    D3D11_MAPPED_SUBRESOURCE mapped = {};
+    HRESULT hr = bridge->context->Map(bridge->staging, 0, D3D11_MAP_READ, 0, &mapped);
+    if (FAILED(hr)) {
+        return -1;
+    }
+
+    // Copy row by row (mapped pitch may differ from w*4)
+    const uint8_t* src = static_cast<const uint8_t*>(mapped.pData);
+    uint32_t dstPitch = w * 4;
+    for (unsigned int y = 0; y < h; y++) {
+        memcpy(out_buffer + y * dstPitch, src + y * mapped.RowPitch, dstPitch);
+    }
+
+    bridge->context->Unmap(bridge->staging, 0);
     return 0;
 }
 
@@ -290,6 +324,59 @@ int32_t spout_discovery_get_sender_name(int32_t index, char* out_name, uint32_t 
     strncpy(out_name, name, name_size - 1);
     out_name[name_size - 1] = '\0';
     return 0;
+}
+
+// ============================================================
+// Consolidated Discovery
+// ============================================================
+
+// Returns a JSON string: [{"name":"..."},{"name":"..."}]
+// Uses a single spoutDX instance for all queries (avoids N+1 DX context churn).
+// Caller must free the returned string with spout_discovery_free_string().
+char* spout_discovery_list_senders(void) {
+    spoutDX spout;
+    int count = spout.GetSenderCount();
+
+    std::string json = "[";
+    bool first = true;
+    for (int i = 0; i < count; i++) {
+        char name[256];
+        memset(name, 0, sizeof(name));
+        if (!spout.GetSenderName(i, name)) continue;
+
+        if (!first) json += ",";
+        first = false;
+        json += "{\"name\":\"";
+        // Escape JSON special characters (including all control chars per JSON spec)
+        for (const char* p = name; *p; p++) {
+            unsigned char c = static_cast<unsigned char>(*p);
+            if (c == '"') {
+                json += "\\\"";
+            } else if (c == '\\') {
+                json += "\\\\";
+            } else if (c == '\n') {
+                json += "\\n";
+            } else if (c == '\r') {
+                json += "\\r";
+            } else if (c == '\t') {
+                json += "\\t";
+            } else if (c < 0x20) {
+                char buf[8];
+                snprintf(buf, sizeof(buf), "\\u%04x", c);
+                json += buf;
+            } else {
+                json += *p;
+            }
+        }
+        json += "\"}";
+    }
+    json += "]";
+
+    return _strdup(json.c_str());
+}
+
+void spout_discovery_free_string(char* str) {
+    if (str) free(str);
 }
 
 } // extern "C"

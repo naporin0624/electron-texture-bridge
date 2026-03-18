@@ -238,9 +238,9 @@ pub struct JsSenderInfo {
 #[napi]
 pub struct TextureReceiver {
     #[cfg(target_os = "macos")]
-    inner: mac::receiver::Receiver,
+    inner: Option<mac::receiver::Receiver>,
     #[cfg(target_os = "windows")]
-    inner: win::receiver::Receiver,
+    inner: Option<win::receiver::Receiver>,
 }
 
 #[napi]
@@ -268,20 +268,24 @@ impl TextureReceiver {
         let inner = win::receiver::Receiver::new(&sender_name)
             .map_err(|e| Error::from_reason(e))?;
 
-        Ok(Self { inner })
+        Ok(Self { inner: Some(inner) })
     }
 
     /// Returns true if the server has output a new frame since the last receive.
     #[napi]
     pub fn has_new_frame(&self) -> bool {
-        self.inner.has_new_frame()
+        self.inner.as_ref().map_or(false, |r| r.has_new_frame())
     }
 
     /// Receive the current frame as RGBA pixel data.
-    /// Returns null if no frame is available.
+    /// Returns null if no frame is available or if stop() has been called.
     #[napi]
     pub fn receive_frame(&self) -> Result<Option<ReceivedFrame>> {
-        match self.inner.receive_rgba() {
+        let inner = match &self.inner {
+            Some(r) => r,
+            None => return Ok(None),
+        };
+        match inner.receive_rgba() {
             Ok(Some((data, width, height))) => Ok(Some(ReceivedFrame {
                 data: data.into(),
                 width,
@@ -295,28 +299,36 @@ impl TextureReceiver {
     /// Returns true if the receiver has a valid connection to a server.
     #[napi]
     pub fn is_connected(&self) -> bool {
-        #[cfg(target_os = "macos")]
-        return self.inner.is_valid();
-        #[cfg(target_os = "windows")]
-        return self.inner.is_connected();
+        match &self.inner {
+            Some(r) => {
+                #[cfg(target_os = "macos")]
+                return r.is_valid();
+                #[cfg(target_os = "windows")]
+                return r.is_connected();
+            }
+            None => false,
+        }
     }
 
     /// Get the width of the last received texture.
     #[napi]
     pub fn get_width(&self) -> u32 {
-        self.inner.width()
+        self.inner.as_ref().map_or(0, |r| r.width())
     }
 
     /// Get the height of the last received texture.
     #[napi]
     pub fn get_height(&self) -> u32 {
-        self.inner.height()
+        self.inner.as_ref().map_or(0, |r| r.height())
     }
 
-    /// Stop the receiver and release resources.
+    /// Stop the receiver and release native resources immediately.
+    /// After calling this, has_new_frame() returns false and receive_frame() returns null.
     #[napi]
-    pub fn stop(&self) -> Result<()> {
-        // Actual cleanup happens in Drop
+    pub fn stop(&mut self) -> Result<()> {
+        if let Some(mut r) = self.inner.take() {
+            r.destroy();
+        }
         Ok(())
     }
 
@@ -418,6 +430,14 @@ mod tests {
         assert_eq!(js_info.name, "Test");
         assert_eq!(js_info.app_name, Some("App".to_string()));
         assert_eq!(js_info.uuid, None);
+    }
+
+    #[test]
+    fn parse_senders_json_with_special_characters_in_name() {
+        let json = r#"[{"name":"My \"VJ\" App"}]"#;
+        let result = parse_senders_json(json).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name, r#"My "VJ" App"#);
     }
 
     #[test]

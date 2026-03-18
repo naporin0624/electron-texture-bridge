@@ -2,7 +2,7 @@ use super::ffi;
 use std::ffi::CString;
 
 pub struct Receiver {
-    handle: ffi::SyphonReceiverHandle,
+    handle: Option<ffi::SyphonReceiverHandle>,
 }
 
 unsafe impl Send for Receiver {}
@@ -35,78 +35,122 @@ impl Receiver {
             return Err("Failed to create Syphon receiver (no matching server?)".into());
         }
 
-        Ok(Self { handle })
+        Ok(Self { handle: Some(handle) })
+    }
+
+    pub fn destroy(&mut self) {
+        if let Some(h) = self.handle.take() {
+            unsafe { ffi::syphon_receiver_destroy(h); }
+        }
     }
 
     pub fn has_new_frame(&self) -> bool {
-        unsafe { ffi::syphon_receiver_has_new_frame(self.handle) != 0 }
+        match self.handle {
+            Some(h) => unsafe { ffi::syphon_receiver_has_new_frame(h) != 0 },
+            None => false,
+        }
     }
 
     pub fn receive_rgba(&self) -> Result<Option<(Vec<u8>, u32, u32)>, String> {
+        let handle = match self.handle {
+            Some(h) => h,
+            None => return Ok(None),
+        };
+
         let mut width: u32 = 0;
         let mut height: u32 = 0;
 
-        // First call with a small buffer to get dimensions
-        // (or succeed if texture fits)
         let estimated_size = self.width() as usize * self.height() as usize * 4;
-        let buf_size = if estimated_size > 0 { estimated_size } else { 4096 * 4096 * 4 };
-        let mut buffer: Vec<u8> = vec![0u8; buf_size];
 
+        if estimated_size == 0 {
+            // First call: probe for dimensions with a minimal buffer.
+            // The C API sets out_width/out_height even on buffer-too-small (-1).
+            let mut probe = vec![0u8; 4];
+            unsafe {
+                ffi::syphon_receiver_receive_rgba(
+                    handle,
+                    probe.as_mut_ptr(),
+                    4,
+                    &mut width,
+                    &mut height,
+                );
+            }
+            if width == 0 || height == 0 {
+                // No server connected yet
+                return Ok(None);
+            }
+            // Fall through to allocate correct size below
+        } else {
+            // Have cached dimensions — allocate exact size
+            let mut buffer: Vec<u8> = vec![0u8; estimated_size];
+            let ret = unsafe {
+                ffi::syphon_receiver_receive_rgba(
+                    handle,
+                    buffer.as_mut_ptr(),
+                    estimated_size as u32,
+                    &mut width,
+                    &mut height,
+                )
+            };
+
+            if ret == 0 {
+                let actual_size = (width as usize) * (height as usize) * 4;
+                buffer.truncate(actual_size);
+                return Ok(Some((buffer, width, height)));
+            }
+
+            // Dimensions changed — width/height updated by C API
+            if width == 0 || height == 0 {
+                return Ok(None);
+            }
+            // Fall through to retry with new dimensions
+        }
+
+        // Allocate with actual dimensions and retry
+        let correct_size = (width as usize) * (height as usize) * 4;
+        let mut buffer = vec![0u8; correct_size];
         let ret = unsafe {
             ffi::syphon_receiver_receive_rgba(
-                self.handle,
+                handle,
                 buffer.as_mut_ptr(),
-                buf_size as u32,
+                correct_size as u32,
                 &mut width,
                 &mut height,
             )
         };
-
         if ret != 0 {
-            if width > 0 && height > 0 {
-                // Buffer was too small; retry with correct size
-                let correct_size = (width as usize) * (height as usize) * 4;
-                buffer.resize(correct_size, 0);
-                let ret2 = unsafe {
-                    ffi::syphon_receiver_receive_rgba(
-                        self.handle,
-                        buffer.as_mut_ptr(),
-                        correct_size as u32,
-                        &mut width,
-                        &mut height,
-                    )
-                };
-                if ret2 != 0 {
-                    return Ok(None);
-                }
-            } else {
-                return Ok(None);
-            }
+            return Ok(None);
         }
-
         let actual_size = (width as usize) * (height as usize) * 4;
         buffer.truncate(actual_size);
         Ok(Some((buffer, width, height)))
     }
 
     pub fn is_valid(&self) -> bool {
-        unsafe { ffi::syphon_receiver_is_valid(self.handle) != 0 }
+        match self.handle {
+            Some(h) => unsafe { ffi::syphon_receiver_is_valid(h) != 0 },
+            None => false,
+        }
     }
 
     pub fn width(&self) -> u32 {
-        unsafe { ffi::syphon_receiver_get_width(self.handle) }
+        match self.handle {
+            Some(h) => unsafe { ffi::syphon_receiver_get_width(h) },
+            None => 0,
+        }
     }
 
     pub fn height(&self) -> u32 {
-        unsafe { ffi::syphon_receiver_get_height(self.handle) }
+        match self.handle {
+            Some(h) => unsafe { ffi::syphon_receiver_get_height(h) },
+            None => 0,
+        }
     }
 }
 
 impl Drop for Receiver {
     fn drop(&mut self) {
-        unsafe {
-            ffi::syphon_receiver_destroy(self.handle);
-        }
+        self.destroy();
     }
 }
 
@@ -117,11 +161,12 @@ pub fn list_servers_json() -> Result<String, String> {
         if ptr.is_null() {
             return Err("Failed to list Syphon servers".into());
         }
-        let json = std::ffi::CStr::from_ptr(ptr)
+        // Always free the C string, even if UTF-8 conversion fails
+        let result = std::ffi::CStr::from_ptr(ptr)
             .to_str()
-            .map_err(|e| e.to_string())?
-            .to_string();
+            .map(|s| s.to_string())
+            .map_err(|e| e.to_string());
         ffi::syphon_discovery_free_string(ptr);
-        Ok(json)
+        result
     }
 }

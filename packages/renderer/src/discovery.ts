@@ -6,6 +6,7 @@ export interface SenderDiscoveryEvents {
   updated: [senders: SenderInfo[]];
   added: [senders: SenderInfo[]];
   removed: [senders: SenderInfo[]];
+  error: [error: Error];
 }
 
 export class SenderDiscovery extends EventEmitter {
@@ -43,26 +44,33 @@ export class SenderDiscovery extends EventEmitter {
   private _refresh(): void {
     if (this._disposed) return;
 
-    const current = listSenders();
-    const prev = this._senders;
+    try {
+      const current = listSenders();
+      const prev = this._senders;
 
-    // Diff: find added senders (in current but not in prev)
-    const added = current.filter((c) => !prev.some((p) => this._isSame(c, p)));
+      // Diff: find added senders (in current but not in prev)
+      const added = current.filter((c) => !prev.some((p) => this._isSame(c, p)));
 
-    // Diff: find removed senders (in prev but not in current)
-    const removed = prev.filter((p) => !current.some((c) => this._isSame(c, p)));
+      // Diff: find removed senders (in prev but not in current)
+      const removed = prev.filter((p) => !current.some((c) => this._isSame(c, p)));
 
-    this._senders = current;
+      this._senders = current;
 
-    if (added.length > 0) {
-      this.emit("added", added);
+      if (added.length > 0) {
+        this.emit("added", added);
+      }
+
+      if (removed.length > 0) {
+        this.emit("removed", removed);
+      }
+
+      if (added.length > 0 || removed.length > 0) {
+        this.emit("updated", current);
+      }
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      this.emit("error", error);
     }
-
-    if (removed.length > 0) {
-      this.emit("removed", removed);
-    }
-
-    this.emit("updated", current);
   }
 
   private _isSame(a: SenderInfo, b: SenderInfo): boolean {
