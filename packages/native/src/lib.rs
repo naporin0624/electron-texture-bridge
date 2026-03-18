@@ -20,9 +20,9 @@ use napi_derive::napi;
 #[napi]
 pub struct TextureSender {
     #[cfg(target_os = "windows")]
-    inner: win::Sender,
+    inner: Option<win::Sender>,
     #[cfg(target_os = "macos")]
-    inner: mac::Sender,
+    inner: Option<mac::Sender>,
 
     width: u32,
     height: u32,
@@ -45,7 +45,7 @@ impl TextureSender {
         let inner = mac::Sender::new(&name)
             .map_err(|e| Error::from_reason(e))?;
 
-        Ok(Self { inner, width, height })
+        Ok(Self { inner: Some(inner), width, height })
     }
 
     /// Send a shared texture to Spout (Win) or Syphon (Mac).
@@ -57,18 +57,20 @@ impl TextureSender {
     /// - `height`: Texture height (from `textureInfo.codedSize.height`)
     #[napi]
     pub fn send(&mut self, handle: i64, width: u32, height: u32) -> Result<()> {
+        let inner = self.inner.as_mut()
+            .ok_or_else(|| Error::from_reason("TextureSender has been stopped"))?;
         self.width = width;
         self.height = height;
 
         #[cfg(target_os = "windows")]
         {
-            self.inner.send(handle)
+            inner.send(handle)
                 .map_err(|e| Error::from_reason(e))?;
         }
 
         #[cfg(target_os = "macos")]
         {
-            self.inner.send(handle, width, height)
+            inner.send(handle, width, height)
                 .map_err(|e| Error::from_reason(e))?;
         }
 
@@ -88,6 +90,8 @@ impl TextureSender {
         width: u32,
         height: u32,
     ) -> Result<()> {
+        let inner = self.inner.as_mut()
+            .ok_or_else(|| Error::from_reason("TextureSender has been stopped"))?;
         self.width = width;
         self.height = height;
 
@@ -101,28 +105,27 @@ impl TextureSender {
                 .map_err(|_| Error::from_reason("Failed to read surface pointer"))?;
             let surface_ptr = u64::from_le_bytes(ptr_bytes);
 
-            self.inner.send_surface(surface_ptr, width, height)
+            inner.send_surface(surface_ptr, width, height)
                 .map_err(|e| Error::from_reason(e))?;
         }
 
         #[cfg(target_os = "windows")]
         {
+            let _ = inner;
             return Err(Error::from_reason("send_surface is macOS only"));
         }
 
         Ok(())
     }
 
-    /// Stop the sender and release resources.
-    /// After calling this, the sender cannot be reused.
+    /// Stop the sender and release native resources immediately.
+    /// This is a terminal operation — the sender cannot be reused afterward.
+    /// Repeated calls are safe and idempotent.
     #[napi]
     pub fn stop(&mut self) -> Result<()> {
-        // Drop が呼ばれるように inner を再構築する方法もあるが、
-        // ここでは JS 側で sender = null して GC に任せる想定。
-        // 明示的に止めたい場合のための API。
-        //
-        // 実際の解放は Drop trait で行われる。
-        // ここでは何もしない（二重解放を防ぐ）。
+        // Drop the inner sender immediately, releasing native resources.
+        // Subsequent calls are idempotent (inner is already None).
+        self.inner.take();
         Ok(())
     }
 
@@ -141,12 +144,14 @@ impl TextureSender {
         height: u32,
         bytes_per_row: Option<u32>,
     ) -> Result<()> {
+        let inner = self.inner.as_mut()
+            .ok_or_else(|| Error::from_reason("TextureSender has been stopped"))?;
         let stride = bytes_per_row.unwrap_or(width * 4);
 
         self.width = width;
         self.height = height;
 
-        self.inner
+        inner
             .send_rgba(data.as_ref(), width, height, stride)
             .map_err(|e| Error::from_reason(e))
     }
