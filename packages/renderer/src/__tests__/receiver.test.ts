@@ -126,6 +126,40 @@ describe("TextureReceiverBridge", () => {
     expect(mockReceiver.stop).toHaveBeenCalledTimes(1);
   });
 
+  it("stop() then start() does not emit bogus FPS from paused interval", () => {
+    const fpsHandler = vi.fn();
+    const bridge = createTextureReceiver({ senderName: "TestSender" });
+    bridge.on("fps", fpsHandler);
+
+    mockReceiver.hasNewFrame.mockReturnValue(true);
+    mockReceiver.receiveFrame.mockReturnValue({
+      data: Buffer.from([0]),
+      width: 1,
+      height: 1,
+    });
+
+    // Run for 500ms (accumulate some frames but not enough for FPS report)
+    bridge.start();
+    vi.advanceTimersByTime(500);
+
+    // Pause for 5 seconds
+    bridge.stop();
+    vi.advanceTimersByTime(5000);
+
+    // Restart — FPS counter should be reset, no bogus near-zero reading
+    fpsHandler.mockClear();
+    bridge.start();
+    vi.advanceTimersByTime(1100);
+
+    // FPS should reflect actual frame rate after restart, not near-zero
+    expect(fpsHandler).toHaveBeenCalled();
+    const fps = fpsHandler.mock.calls[0][0];
+    // At 16ms polling, expect ~60 FPS, not near-zero from the 5s pause
+    expect(fps).toBeGreaterThan(30);
+
+    bridge.dispose();
+  });
+
   it("emits 'error' when receiveFrame throws", () => {
     const handler = vi.fn();
     const bridge = createTextureReceiver({ senderName: "TestSender" });

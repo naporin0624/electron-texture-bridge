@@ -119,7 +119,7 @@ impl Receiver {
             )
         };
         if ret != 0 {
-            return Ok(None);
+            return Err("Syphon receive failed: Metal readback error after buffer retry".into());
         }
         let actual_size = (width as usize) * (height as usize) * 4;
         buffer.truncate(actual_size);

@@ -3,6 +3,12 @@ export class FpsCounter {
   private count = 0;
   private lastTime = Date.now();
 
+  /** Reset the counter, discarding any accumulated frames and time. */
+  reset(): void {
+    this.count = 0;
+    this.lastTime = Date.now();
+  }
+
   /** Call on every frame. Returns FPS when 1 second has elapsed, otherwise null. */
   tick(): number | null {
     this.count++;

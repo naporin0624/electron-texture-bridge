@@ -85,6 +85,12 @@ jobs:
 
       - run: pnpm install
 
+      - name: Native cargo tests
+        if: matrix.target != 'x86_64-apple-darwin'
+        run: cargo test --manifest-path packages/native/Cargo.toml
+        env:
+          CARGO_BUILD_TARGET: ${{ matrix.target }}
+
       - name: Build native addon
         working-directory: packages/native
         run: pnpm run build
@@ -218,6 +224,15 @@ jobs:
                 };
                 fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + '\n');
               " "$pkg_dir"
+            fi
+          done
+
+      - name: Verify darwin platform packages
+        working-directory: packages/native
+        run: |
+          for darwin_pkg in npm/darwin-*/; do
+            if [ -d "$darwin_pkg" ]; then
+              test -f "$darwin_pkg/Syphon.framework/Versions/A/Syphon"
             fi
           done
 

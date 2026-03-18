@@ -125,6 +125,10 @@ Sub-exports:
 - **Path-based detection:** release-please only creates a release PR when Conventional Commits (`fix:`, `feat:`, etc.) touch files **inside** a configured package path (`packages/native/`, `packages/core/`, `packages/renderer/`). Changes to root-level files (`.github/workflows/ci.yml`, root `package.json`, etc.) are **ignored** and will not trigger a release PR.
 - To trigger a release for CI-only or root-level fixes, make a change (e.g. bump comment or changelog entry) inside one of the package directories, or create the release PR manually.
 
+## Workflow: Before Starting Implementation
+
+Before writing any new code, check [`tasks.md`](tasks.md) for pending implementation plans. Each task links to a detailed plan document in `docs/superpowers/plans/`. If the work you're about to do is already planned there, follow the existing plan rather than designing from scratch.
+
 ## Tooling Notes
 
 - **TypeScript:** Uses `tsgo` (native TS compiler preview) for type checking, `tsdown` for bundling core

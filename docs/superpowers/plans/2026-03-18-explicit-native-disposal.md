@@ -277,3 +277,139 @@ Do not mix “temporarily paused” semantics into `stop()`. If pause/resume is 
 - Post-stop operational calls fail deterministically and are documented.
 - TypeScript `dispose()` methods rely on explicit teardown, not GC timing.
 - Tests and docs reflect terminal disposal semantics consistently.
+
+---
+
+## Optional Ergonomics Layer: Node.js `using` Support
+
+This is a sugar layer on top of the deterministic disposal model above. It must not replace `stop()` / `dispose()` as the primary lifecycle contract.
+
+### Goal
+
+Allow consumers on modern Node.js / TypeScript toolchains to write:
+
+```ts
+using sender = new TextureSender("MyApp", 1920, 1080);
+using receiver = new TextureReceiver("MySender");
+```
+
+while keeping the canonical lifecycle semantics:
+
+- `TextureSender.stop()` is the real teardown primitive
+- `TextureReceiver.stop()` is the real teardown primitive
+- wrapper `dispose()` methods are the real teardown primitive for higher-level abstractions
+
+### Design Rules
+
+- `using` support is additive only
+- `[Symbol.dispose]()` must delegate directly to existing terminal teardown
+- `stop()` / `dispose()` remain the documented primary API
+- disposal must stay idempotent regardless of whether it is triggered via `using` or explicit calls
+- consumers without `using` support must continue to work with `try/finally`
+
+### Candidate API Surface
+
+**Low-level native-facing objects**
+
+- `TextureSender[Symbol.dispose]()` -> calls `stop()`
+- `TextureReceiver[Symbol.dispose]()` -> calls `stop()`
+
+**High-level wrappers**
+
+- `TextureBridge[Symbol.dispose]()` -> calls `dispose()`
+- `TextureReceiverBridge[Symbol.dispose]()` -> calls `dispose()`
+
+### Recommended Scope
+
+Implement in this order:
+
+1. `TextureSender`
+2. `TextureReceiver`
+3. `TextureReceiverBridge`
+4. `TextureBridge`
+
+The sender/receiver objects are the best fit because they are direct resource owners. The bridge objects are still valid candidates, but they are longer-lived orchestration objects and may be used less often with block-scoped `using`.
+
+### Implementation Approach
+
+- [ ] **Step 1: Keep explicit disposal as the foundation**
+
+Do not start `using` support until the deterministic `stop()` / `dispose()` work is complete.
+
+- [ ] **Step 2: Add `[Symbol.dispose]()` to TypeScript-managed wrappers**
+
+In TypeScript classes that already implement terminal teardown, add:
+
+```ts
+[Symbol.dispose](): void {
+  this.dispose();
+}
+```
+
+or for low-level objects:
+
+```ts
+[Symbol.dispose](): void {
+  this.stop();
+}
+```
+
+- [ ] **Step 3: Expose `[Symbol.dispose]()` on native classes**
+
+If napi-rs cannot expose symbol-named methods directly in a clean way, add a thin JavaScript wrapper layer in the package entrypoint that decorates the exported constructors/prototypes:
+
+```ts
+TextureSender.prototype[Symbol.dispose] = function () {
+  this.stop();
+};
+```
+
+Apply the same pattern to `TextureReceiver`.
+
+- [ ] **Step 4: Document this as ergonomic sugar, not a lifecycle replacement**
+
+Update docs to show both styles:
+
+```ts
+using receiver = new TextureReceiver("MySender");
+```
+
+and:
+
+```ts
+const receiver = new TextureReceiver("MySender");
+try {
+  // ...
+} finally {
+  receiver.stop();
+}
+```
+
+- [ ] **Step 5: Add tests for mixed usage**
+
+Validate:
+
+- explicit `stop()` followed by `[Symbol.dispose]()` is safe
+- `[Symbol.dispose]()` followed by explicit `stop()` is safe
+- stopped objects remain unusable regardless of disposal path
+
+### Risks
+
+#### 1. Toolchain support is consumer-dependent
+
+`using` support depends on the consumer's Node.js, Electron, and TypeScript/transpilation setup. That makes it unsuitable as the primary lifecycle API.
+
+#### 2. Async factories are less natural with `using`
+
+`createTextureBridge()` is async and returns a long-lived orchestration object. It may still implement `[Symbol.dispose]`, but it is a weaker fit for the `using` pattern than direct sender/receiver handles.
+
+#### 3. Semantic drift
+
+If `[Symbol.dispose]()` and `stop()` / `dispose()` ever diverge, the API becomes confusing immediately. They must remain exact aliases for the same terminal teardown.
+
+### Definition of Done for `using` Support
+
+- `[Symbol.dispose]()` exists on the intended objects
+- all symbol-based disposal paths delegate to existing terminal teardown
+- documentation presents `using` as optional sugar
+- non-`using` consumers remain first-class and fully supported

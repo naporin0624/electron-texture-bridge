@@ -462,8 +462,8 @@ asarUnpack:
 
 # macOS: Syphon.framework をバンドル
 mac:
-  extraResources:
-    - from: node_modules/@napolab/texture-bridge/Syphon.framework
+  extraFiles:
+    - from: path/to/Syphon.framework
       to: Frameworks/Syphon.framework
 ```
 

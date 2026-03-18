@@ -56,6 +56,7 @@ class TextureReceiverBridgeImpl extends EventEmitter implements TextureReceiverB
 
   start(): void {
     if (this._disposed || this._timer) return;
+    this.fpsCounter.reset();
     this._timer = setInterval(() => this._poll(), this.pollIntervalMs);
   }
 
