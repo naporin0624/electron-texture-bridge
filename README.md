@@ -427,8 +427,10 @@ try {
   sender.stop();
 }
 
-// Also supports Symbol.dispose for use with `using` declarations
-// (requires importing from @napolab/texture-bridge-core)
+// Also supports Symbol.dispose for use with `using` declarations.
+// Requires Node.js 22+ (or a runtime with Symbol.dispose support) and
+// `"lib": ["ESNext.Disposable"]` in your tsconfig.json.
+// Import from @napolab/texture-bridge-core for runtime Symbol.dispose patching.
 using sender = new TextureSender("MyApp", 1920, 1080);
 ```
 
