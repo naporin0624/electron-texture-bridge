@@ -19,6 +19,16 @@ if (typeof Symbol.dispose === "symbol") {
   };
 }
 
+// Augment native class types with Symbol.dispose (added at runtime above).
+declare module "@napolab/texture-bridge" {
+  interface TextureSender {
+    [Symbol.dispose](): void;
+  }
+  interface TextureReceiver {
+    [Symbol.dispose](): void;
+  }
+}
+
 export { TextureSender, TextureReceiver, getPlatform, listSenders };
 export type { TextureInfo, PaintTexture, Platform, PixelFormat, SenderInfo, ReceivedFrame };
 

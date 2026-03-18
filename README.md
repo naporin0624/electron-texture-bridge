@@ -428,6 +428,7 @@ try {
 }
 
 // Also supports Symbol.dispose for use with `using` declarations
+// (requires importing from @napolab/texture-bridge-core)
 using sender = new TextureSender("MyApp", 1920, 1080);
 ```
 
