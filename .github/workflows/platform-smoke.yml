@@ -1,0 +1,116 @@
+name: Platform Smoke
+
+on:
+  workflow_dispatch:
+
+jobs:
+  macos-native-smoke:
+    runs-on: macos-14
+    name: macOS Native Smoke
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build Syphon.framework
+        run: |
+          cd vendor/syphon-src
+          xcodebuild -project Syphon.xcodeproj \
+            -scheme Syphon \
+            -configuration Release \
+            -derivedDataPath build \
+            ONLY_ACTIVE_ARCH=NO \
+            BUILD_LIBRARY_FOR_DISTRIBUTION=YES
+          cp -R build/Build/Products/Release/Syphon.framework ../Syphon.framework
+
+      - run: pnpm install
+
+      - name: Build core and renderer (types needed by example)
+        run: pnpm build:core && pnpm build:renderer
+
+      - name: Native cargo tests
+        run: cargo test --manifest-path packages/native/Cargo.toml
+
+      - name: Build native addon
+        run: pnpm build:native
+
+      - name: Example typecheck
+        run: pnpm --filter @napolab/texture-bridge-example typecheck
+
+      - name: Example build
+        run: pnpm --filter @napolab/texture-bridge-example build
+
+      - name: Example macOS packaging smoke test
+        working-directory: packages/example
+        run: pnpm exec electron-builder --dir --mac
+
+      - name: Verify packaged Syphon.framework
+        run: |
+          test -f packages/example/dist/mac-arm64/TextureBridgeExample.app/Contents/Frameworks/Syphon.framework/Versions/A/Syphon
+          test -f packages/example/dist/mac-arm64/TextureBridgeExample.app/Contents/Resources/app.asar.unpacked/node_modules/@napolab/texture-bridge/index.darwin-arm64.node
+
+  windows-native-smoke:
+    runs-on: windows-latest
+    name: Windows Native Smoke
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Fetch Spout2 SDK
+        shell: pwsh
+        run: |
+          git clone --depth 1 https://github.com/leadedge/Spout2.git _spout2_tmp
+          New-Item -ItemType Directory -Force vendor/Spout2
+          Copy-Item -Recurse _spout2_tmp/SPOUTSDK/SpoutDirectX vendor/Spout2/SpoutDirectX
+          Copy-Item -Recurse _spout2_tmp/SPOUTSDK/SpoutGL vendor/Spout2/SpoutGL
+          Remove-Item -Recurse -Force _spout2_tmp
+
+      - run: pnpm install
+
+      - name: Build core and renderer (types needed by example)
+        run: pnpm build:core && pnpm build:renderer
+
+      - name: Native cargo tests
+        run: cargo test --manifest-path packages/native/Cargo.toml
+
+      - name: Build native addon
+        run: pnpm build:native
+
+      - name: Example typecheck
+        run: pnpm --filter @napolab/texture-bridge-example typecheck
+
+      - name: Example build
+        run: pnpm --filter @napolab/texture-bridge-example build
+
+      - name: Example Windows packaging smoke test
+        working-directory: packages/example
+        run: pnpm exec electron-builder --dir --win
+
+      - name: Verify packaged Spout addon
+        shell: pwsh
+        run: |
+          $appRoot = "packages/example/dist/win-unpacked/resources"
+          if (-not (Test-Path "$appRoot/app.asar.unpacked/node_modules/@napolab/texture-bridge/index.win32-x64-msvc.node")) {
+            throw "Packaged Spout addon was not found under $appRoot"
+          }
