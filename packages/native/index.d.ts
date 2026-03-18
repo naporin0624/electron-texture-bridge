@@ -36,6 +36,8 @@ export declare class TextureSender {
    *   - macOS: `texture.textureInfo.handle` (IOSurfaceID as number)
    * - `width`: Texture width (from `textureInfo.codedSize.width`)
    * - `height`: Texture height (from `textureInfo.codedSize.height`)
+   *
+   * @throws Error if `stop()` has been called
    */
   send(handle: number, width: number, height: number): void
   /**
@@ -45,11 +47,14 @@ export declare class TextureSender {
    * - `surface_buffer`: Buffer containing IOSurfaceRef pointer (8 bytes on 64-bit)
    * - `width`: Texture width
    * - `height`: Texture height
+   *
+   * @throws Error if `stop()` has been called
    */
   sendSurface(surfaceBuffer: Buffer, width: number, height: number): void
   /**
-   * Stop the sender and release resources.
-   * After calling this, the sender cannot be reused.
+   * Stop the sender and release native resources immediately.
+   * This is a terminal operation — the sender cannot be reused afterward.
+   * Repeated calls are safe and idempotent.
    */
   stop(): void
   /**
@@ -60,6 +65,8 @@ export declare class TextureSender {
    * - `width`: Texture width in pixels
    * - `height`: Texture height in pixels
    * - `bytes_per_row`: Optional stride in bytes. Defaults to width * 4 if not provided.
+   *
+   * @throws Error if `stop()` has been called
    */
   sendRgbaBuffer(data: Buffer, width: number, height: number, bytesPerRow?: number | undefined | null): void
   /** Get the current platform name. */
@@ -74,22 +81,35 @@ export declare class TextureReceiver {
    * - `server_uuid`: (macOS only) Connect by server UUID (highest priority)
    */
   constructor(senderName: string, appName?: string | undefined | null, serverUuid?: string | undefined | null)
-  /** Returns true if the server has output a new frame since the last receive. */
+  /**
+   * Returns true if the server has output a new frame since the last receive.
+   * Returns false if `stop()` has been called.
+   */
   hasNewFrame(): boolean
   /**
    * Receive the current frame as RGBA pixel data.
-   * Returns null if no frame is available or if stop() has been called.
+   * Returns null if no frame is available or if `stop()` has been called.
    */
   receiveFrame(): ReceivedFrame | null
-  /** Returns true if the receiver has a valid connection to a server. */
+  /**
+   * Returns true if the receiver has a valid connection to a server.
+   * Returns false if `stop()` has been called.
+   */
   isConnected(): boolean
-  /** Get the width of the last received texture. */
+  /**
+   * Get the width of the last received texture.
+   * Returns 0 if `stop()` has been called.
+   */
   getWidth(): number
-  /** Get the height of the last received texture. */
+  /**
+   * Get the height of the last received texture.
+   * Returns 0 if `stop()` has been called.
+   */
   getHeight(): number
   /**
    * Stop the receiver and release native resources immediately.
-   * After calling this, has_new_frame() returns false and receive_frame() returns null.
+   * This is a terminal operation — the receiver cannot be reused afterward.
+   * Repeated calls are safe and idempotent.
    */
   stop(): void
   /** Get the current platform name. */

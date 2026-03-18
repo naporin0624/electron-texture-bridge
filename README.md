@@ -388,7 +388,7 @@ class TextureSender {
   sendSurface(surfaceBuffer: Buffer, width: number, height: number): void;
   sendRgbaBuffer(data: Buffer, width: number, height: number, bytesPerRow?: number): void;
   platform(): string;
-  stop(): void;
+  stop(): void;  // Terminal — releases native resources immediately
 }
 ```
 
@@ -405,8 +405,30 @@ class TextureReceiver {
   getWidth(): number;
   getHeight(): number;
   platform(): string;
-  stop(): void;
+  stop(): void;  // Terminal — releases native resources immediately
 }
+```
+
+#### Resource Lifecycle
+
+Both `TextureSender` and `TextureReceiver` follow deterministic disposal semantics:
+
+1. **`stop()` releases native resources immediately.** Do not rely on garbage collection for cleanup.
+2. **`stop()` is terminal.** The instance cannot be reused afterward. Any operational method called after `stop()` will throw an error (sender) or return a safe terminal value (receiver).
+3. **`stop()` is idempotent.** Repeated calls are safe and return without error.
+4. **Higher-level `dispose()` methods** (on `TextureBridge`, `TextureReceiverBridge`) forward to native `stop()` and are also terminal.
+
+```typescript
+// Recommended pattern
+const sender = new TextureSender("MyApp", 1920, 1080);
+try {
+  // ... use sender ...
+} finally {
+  sender.stop();
+}
+
+// Also supports Symbol.dispose for use with `using` declarations
+using sender = new TextureSender("MyApp", 1920, 1080);
 ```
 
 #### `listSenders()`
