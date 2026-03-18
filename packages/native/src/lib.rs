@@ -277,13 +277,14 @@ impl TextureReceiver {
     }
 
     /// Returns true if the server has output a new frame since the last receive.
+    /// Returns false if `stop()` has been called.
     #[napi]
     pub fn has_new_frame(&self) -> bool {
         self.inner.as_ref().map_or(false, |r| r.has_new_frame())
     }
 
     /// Receive the current frame as RGBA pixel data.
-    /// Returns null if no frame is available or if stop() has been called.
+    /// Returns null if no frame is available or if `stop()` has been called.
     #[napi]
     pub fn receive_frame(&self) -> Result<Option<ReceivedFrame>> {
         let inner = match &self.inner {
@@ -302,6 +303,7 @@ impl TextureReceiver {
     }
 
     /// Returns true if the receiver has a valid connection to a server.
+    /// Returns false if `stop()` has been called.
     #[napi]
     pub fn is_connected(&self) -> bool {
         match &self.inner {
@@ -316,19 +318,22 @@ impl TextureReceiver {
     }
 
     /// Get the width of the last received texture.
+    /// Returns 0 if `stop()` has been called.
     #[napi]
     pub fn get_width(&self) -> u32 {
         self.inner.as_ref().map_or(0, |r| r.width())
     }
 
     /// Get the height of the last received texture.
+    /// Returns 0 if `stop()` has been called.
     #[napi]
     pub fn get_height(&self) -> u32 {
         self.inner.as_ref().map_or(0, |r| r.height())
     }
 
     /// Stop the receiver and release native resources immediately.
-    /// After calling this, has_new_frame() returns false and receive_frame() returns null.
+    /// This is a terminal operation — the receiver cannot be reused afterward.
+    /// Repeated calls are safe and idempotent.
     #[napi]
     pub fn stop(&mut self) -> Result<()> {
         if let Some(mut r) = self.inner.take() {
