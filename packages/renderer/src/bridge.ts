@@ -102,6 +102,7 @@ class TextureBridgeImpl extends EventEmitter implements TextureBridge {
       this.sender = new TextureSender(this.options.name, width, height);
     } catch (err) {
       this.options = prevOpts;
+      this._renderWindow.setSize(prevOpts.width, prevOpts.height);
       this.sender = new TextureSender(prevOpts.name, prevOpts.width, prevOpts.height);
       throw err;
     }
