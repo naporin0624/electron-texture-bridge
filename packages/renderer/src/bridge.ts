@@ -48,12 +48,11 @@ class TextureBridgeImpl extends EventEmitter implements TextureBridge {
 
   /** Handle a paint event from the offscreen BrowserWindow. */
   handlePaint(event: PaintEvent): void {
-    if (this._disposed) return;
-
     const texture = event.texture;
     if (!texture?.textureInfo) return;
 
     try {
+      if (this._disposed) return;
       sendTextureFromPaintEvent(this.sender, texture.textureInfo);
       this.previewManager?.sendFrame(texture);
     } catch (err) {
@@ -63,6 +62,7 @@ class TextureBridgeImpl extends EventEmitter implements TextureBridge {
       texture.release?.();
     }
 
+    if (this._disposed) return;
     const fps = this.fpsCounter.tick();
     if (fps !== null) {
       this.emit("fps", fps);
@@ -94,8 +94,10 @@ class TextureBridgeImpl extends EventEmitter implements TextureBridge {
     this._renderWindow.setSize(width, height);
 
     // 2. Recreate native sender with new dimensions
+    //    Create new sender first — if it throws, keep the old one alive.
+    const newSender = new TextureSender(this.options.name, width, height);
     this.sender.stop();
-    this.sender = new TextureSender(this.options.name, width, height);
+    this.sender = newSender;
 
     // 3. Update preview canvas size
     this.previewManager?.updateSize(width, height);
