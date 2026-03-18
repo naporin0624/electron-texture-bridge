@@ -317,7 +317,7 @@ int32_t spout_discovery_get_sender_name(int32_t index, char* out_name, uint32_t 
     char name[256];
     memset(name, 0, sizeof(name));
 
-    if (!spout.GetSenderName(index, name)) {
+    if (!spout.GetSender(index, name)) {
         return -1;
     }
 
@@ -342,7 +342,7 @@ char* spout_discovery_list_senders(void) {
     for (int i = 0; i < count; i++) {
         char name[256];
         memset(name, 0, sizeof(name));
-        if (!spout.GetSenderName(i, name)) continue;
+        if (!spout.GetSender(i, name)) continue;
 
         if (!first) json += ",";
         first = false;
