@@ -90,6 +90,9 @@ fn build_macos(vendor_dir: &std::path::Path) {
 
     // `cargo run` のバイナリは target/debug/、`cargo test` の libtest バイナリは
     // target/debug/deps/ に置かれる。両方から workspace の vendor/ を辿れるようにする。
+    // CARGO_BUILD_TARGET 指定時は target/<triple>/debug/deps/ と1段深くなるため
+    // 4段上のパスも追加する。
     println!("cargo:rustc-link-arg=-Wl,-rpath,@loader_path/../../vendor");
     println!("cargo:rustc-link-arg=-Wl,-rpath,@loader_path/../../../vendor");
+    println!("cargo:rustc-link-arg=-Wl,-rpath,@loader_path/../../../../vendor");
 }
