@@ -71,6 +71,8 @@ export declare class TextureSender {
   sendRgbaBuffer(data: Buffer, width: number, height: number, bytesPerRow?: number | undefined | null): void
   /** Get the current platform name. */
   platform(): string
+  /** Alias for `stop()` — enables `using` declarations. */
+  [Symbol.dispose](): void
 }
 export declare class TextureReceiver {
   /**
@@ -114,4 +116,6 @@ export declare class TextureReceiver {
   stop(): void
   /** Get the current platform name. */
   platform(): string
+  /** Alias for `stop()` — enables `using` declarations. */
+  [Symbol.dispose](): void
 }
