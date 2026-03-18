@@ -93,11 +93,17 @@ class TextureBridgeImpl extends EventEmitter implements TextureBridge {
     // 1. Resize offscreen BrowserWindow
     this._renderWindow.setSize(width, height);
 
-    // 2. Recreate native sender with new dimensions
-    //    Create new sender first — if it throws, keep the old one alive.
-    const newSender = new TextureSender(this.options.name, width, height);
+    // 2. Recreate native sender with new dimensions.
+    //    Must stop the old sender first — Spout requires unique sender names.
+    //    If the new sender fails, restore one with the original dimensions.
+    const prevOpts = this.options;
     this.sender.stop();
-    this.sender = newSender;
+    try {
+      this.sender = new TextureSender(this.options.name, width, height);
+    } catch (err) {
+      this.sender = new TextureSender(prevOpts.name, prevOpts.width, prevOpts.height);
+      throw err;
+    }
 
     // 3. Update preview canvas size
     this.previewManager?.updateSize(width, height);
