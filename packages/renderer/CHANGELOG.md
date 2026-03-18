@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.6.0](https://github.com/naporin0624/electron-texture-bridge/compare/renderer-v0.5.1...renderer-v0.6.0) (2026-03-18)
+
+
+### Features
+
+* explicit native disposal with Symbol.dispose support ([#18](https://github.com/naporin0624/electron-texture-bridge/issues/18)) ([e65509e](https://github.com/naporin0624/electron-texture-bridge/commit/e65509eb4b12175c6f4416d3f983f2cbf506ecc4))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @napolab/texture-bridge-core bumped to 0.6.0
+
 ## [0.5.1](https://github.com/naporin0624/electron-texture-bridge/compare/renderer-v0.5.0...renderer-v0.5.1) (2026-03-18)
 
 

@@ -1,5 +1,5 @@
 {
-  "packages/native": "0.5.1",
-  "packages/core": "0.5.1",
-  "packages/renderer": "0.5.1"
+  "packages/native": "0.6.0",
+  "packages/core": "0.6.0",
+  "packages/renderer": "0.6.0"
 }
