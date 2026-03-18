@@ -8,6 +8,17 @@ import type {
   ReceivedFrame,
 } from "./types";
 
+// Attach Symbol.dispose to native classes so `using` declarations work.
+// napi-rs cannot expose symbol-named methods, so we patch the prototypes here.
+if (typeof Symbol.dispose === "symbol") {
+  (TextureSender.prototype as any)[Symbol.dispose] = function () {
+    this.stop();
+  };
+  (TextureReceiver.prototype as any)[Symbol.dispose] = function () {
+    this.stop();
+  };
+}
+
 export { TextureSender, TextureReceiver, getPlatform, listSenders };
 export type { TextureInfo, PaintTexture, Platform, PixelFormat, SenderInfo, ReceivedFrame };
 
