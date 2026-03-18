@@ -89,6 +89,7 @@ jobs:
   windows-native-smoke:
     runs-on: windows-latest
     name: Windows Native Smoke
+    environment: expensive-ci
     steps:
       - uses: actions/checkout@v4
 
