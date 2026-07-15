@@ -9,7 +9,7 @@
     "skipLibCheck": true,
     "outDir": "dist",
     "rootDir": "src",
-    "lib": ["ES2020", "ESNext.Disposable"]
+    "lib": ["ES2020", "ES2022.Error", "ESNext.Disposable"]
   },
   "include": ["src"]
 }

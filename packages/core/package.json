@@ -18,7 +18,8 @@
     "typecheck": "tsgo --noEmit"
   },
   "dependencies": {
-    "@napolab/texture-bridge": "workspace:*"
+    "@napolab/texture-bridge": "workspace:*",
+    "neverthrow": "^8.2.0"
   },
   "peerDependencies": {
     "electron": ">=40.0.0"
