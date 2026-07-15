@@ -20,6 +20,7 @@
  */
 
 import { sharedTexture } from "electron";
+import { toError } from "../to-error";
 import { createMultiDispatcher } from "./multi-dispatcher";
 
 export interface SharedTextureConsumerFrame {
@@ -64,8 +65,11 @@ const dispatcher = createMultiDispatcher<DispatchArgs, Promise<void>>({
   },
 });
 
-let receiverInstalled = false;
-let notInstalledWarningShown = false;
+/** Module-level install state. Mutable via property writes (repo bans `let`). */
+const installState = {
+  receiverInstalled: false,
+  notInstalledWarningShown: false,
+};
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -83,8 +87,8 @@ let notInstalledWarningShown = false;
  * @experimental Requires Electron 40+ `sharedTexture` module.
  */
 export const installSharedTextureReceiver = (): void => {
-  if (receiverInstalled) return;
-  receiverInstalled = true;
+  if (installState.receiverInstalled) return;
+  installState.receiverInstalled = true;
   sharedTexture.setSharedTextureReceiver(async (data, ...args) => {
     const imported = data.importedSharedTexture;
     try {
@@ -135,8 +139,8 @@ export const installSharedTextureReceiver = (): void => {
 export const consumeSharedTexture = (
   handlers: SharedTextureConsumerHandlers,
 ): SharedTextureConsumerRegistration => {
-  if (!receiverInstalled && !notInstalledWarningShown) {
-    notInstalledWarningShown = true;
+  if (!installState.receiverInstalled && !installState.notInstalledWarningShown) {
+    installState.notInstalledWarningShown = true;
     console.warn(
       "[consumeSharedTexture] Called before installSharedTextureReceiver(). Frames will not be delivered until install is called at renderer startup.",
     );
@@ -151,7 +155,7 @@ export const consumeSharedTexture = (
       // A consumer whose `onError` itself throws must not crash the outer
       // try/finally (which would leak VideoFrame.close()).
       try {
-        handlers.onError?.(err instanceof Error ? err : new Error(String(err)));
+        handlers.onError?.(toError(err));
       } catch (handlerErr) {
         console.error("[consumeSharedTexture] onError handler threw:", handlerErr);
       }
@@ -180,6 +184,6 @@ export const consumeSharedTexture = (
  */
 export const _resetSharedTextureRegistryForTesting = (): void => {
   dispatcher.reset();
-  receiverInstalled = false;
-  notInstalledWarningShown = false;
+  installState.receiverInstalled = false;
+  installState.notInstalledWarningShown = false;
 };
