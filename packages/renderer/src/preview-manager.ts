@@ -1,5 +1,6 @@
 import { BrowserWindow, ipcMain, sharedTexture } from "electron";
 import path from "path";
+import type { TextureInfo } from "@napolab/texture-bridge-core";
 import type { PreviewOptions } from "./types";
 
 /**
@@ -7,9 +8,9 @@ import type { PreviewOptions } from "./types";
  * natively in CJS output and injected via tsdown's `--shims` flag in ESM output
  * (see package.json build script), so this works in both module formats.
  */
-function assetPath(filename: string): string {
+const assetPath = (filename: string): string => {
   return path.join(__dirname, "assets", filename);
-}
+};
 
 export class PreviewManager {
   private win: BrowserWindow | null = null;
@@ -17,6 +18,7 @@ export class PreviewManager {
   private width: number;
   private height: number;
   private title: string;
+  private previewReadyListener: ((event: Electron.IpcMainEvent) => void) | null = null;
 
   constructor(width: number, height: number, options?: PreviewOptions) {
     this.width = width;
@@ -32,11 +34,17 @@ export class PreviewManager {
     return this.win !== null && !this.win.isDestroyed();
   }
 
-  private onPreviewReady = (_event: Electron.IpcMainEvent): void => {
+  private handlePreviewReady(event: Electron.IpcMainEvent): void {
     if (!this.win || this.win.isDestroyed()) return;
-    if (_event.sender.id !== this.win.webContents.id) return;
+    if (event.sender.id !== this.win.webContents.id) return;
     this.ready = true;
-  };
+  }
+
+  private removePreviewReadyListener(): void {
+    if (!this.previewReadyListener) return;
+    ipcMain.removeListener("preview-ready", this.previewReadyListener);
+    this.previewReadyListener = null;
+  }
 
   open(): void {
     if (this.isOpen) return;
@@ -55,25 +63,29 @@ export class PreviewManager {
       },
     });
 
-    ipcMain.on("preview-ready", this.onPreviewReady);
+    const listener = (event: Electron.IpcMainEvent): void => {
+      this.handlePreviewReady(event);
+    };
+    this.previewReadyListener = listener;
+    ipcMain.on("preview-ready", listener);
 
     this.win.loadFile(assetPath("preview.html"), {
-      query: { w: String(this.width), h: String(this.height) },
+      query: { w: `${this.width}`, h: `${this.height}` },
     });
 
     this.win.on("closed", () => {
       this.win = null;
       this.ready = false;
-      ipcMain.removeListener("preview-ready", this.onPreviewReady);
+      this.removePreviewReadyListener();
     });
   }
 
-  sendFrame(texture: { textureInfo: unknown }): void {
+  sendFrame(texture: { textureInfo: TextureInfo }): void {
     if (!this.win || this.win.isDestroyed() || !this.ready) return;
 
     try {
       const imported = sharedTexture.importSharedTexture({
-        textureInfo: texture.textureInfo as Electron.SharedTextureImportTextureInfo,
+        textureInfo: texture.textureInfo,
       });
       if (!imported) return;
 
@@ -91,9 +103,10 @@ export class PreviewManager {
   updateSize(width: number, height: number): void {
     this.width = width;
     this.height = height;
-    if (!this.isOpen) return;
-    this.win!.loadFile(assetPath("preview.html"), {
-      query: { w: String(width), h: String(height) },
+    const win = this.win;
+    if (!win || win.isDestroyed()) return;
+    win.loadFile(assetPath("preview.html"), {
+      query: { w: `${width}`, h: `${height}` },
     });
   }
 
@@ -105,7 +118,7 @@ export class PreviewManager {
   }
 
   dispose(): void {
-    ipcMain.removeListener("preview-ready", this.onPreviewReady);
+    this.removePreviewReadyListener();
     this.close();
   }
 }
