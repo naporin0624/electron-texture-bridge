@@ -30,7 +30,8 @@
     "typecheck": "tsgo --noEmit"
   },
   "dependencies": {
-    "@napolab/texture-bridge-core": "workspace:*"
+    "@napolab/texture-bridge-core": "workspace:*",
+    "neverthrow": "^8.2.0"
   },
   "peerDependencies": {
     "electron": ">=40.0.0"

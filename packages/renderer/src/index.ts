@@ -14,3 +14,11 @@ export type {
   SharedTextureReceiverBridgeEvents,
 } from "./shared-texture-receiver";
 export type { SenderDiscoveryEvents } from "./discovery";
+export {
+  FrameReceiveError,
+  TextureImportError,
+  TextureDeliveryError,
+  UnsupportedPixelFormatError,
+  ReceiverStoppedError,
+} from "./errors";
+export type { SendPipelineError } from "./errors";
