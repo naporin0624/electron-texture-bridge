@@ -65,11 +65,8 @@ const dispatcher = createMultiDispatcher<DispatchArgs, Promise<void>>({
   },
 });
 
-/** Module-level install state. Mutable via property writes (repo bans `let`). */
-const installState = {
-  receiverInstalled: false,
-  notInstalledWarningShown: false,
-};
+let receiverInstalled = false;
+let notInstalledWarningShown = false;
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -87,8 +84,8 @@ const installState = {
  * @experimental Requires Electron 40+ `sharedTexture` module.
  */
 export const installSharedTextureReceiver = (): void => {
-  if (installState.receiverInstalled) return;
-  installState.receiverInstalled = true;
+  if (receiverInstalled) return;
+  receiverInstalled = true;
   sharedTexture.setSharedTextureReceiver(async (data, ...args) => {
     const imported = data.importedSharedTexture;
     try {
@@ -139,8 +136,8 @@ export const installSharedTextureReceiver = (): void => {
 export const consumeSharedTexture = (
   handlers: SharedTextureConsumerHandlers,
 ): SharedTextureConsumerRegistration => {
-  if (!installState.receiverInstalled && !installState.notInstalledWarningShown) {
-    installState.notInstalledWarningShown = true;
+  if (!receiverInstalled && !notInstalledWarningShown) {
+    notInstalledWarningShown = true;
     console.warn(
       "[consumeSharedTexture] Called before installSharedTextureReceiver(). Frames will not be delivered until install is called at renderer startup.",
     );
@@ -184,6 +181,6 @@ export const consumeSharedTexture = (
  */
 export const _resetSharedTextureRegistryForTesting = (): void => {
   dispatcher.reset();
-  installState.receiverInstalled = false;
-  installState.notInstalledWarningShown = false;
+  receiverInstalled = false;
+  notInstalledWarningShown = false;
 };
