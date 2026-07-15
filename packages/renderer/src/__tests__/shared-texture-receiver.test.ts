@@ -61,8 +61,12 @@ const makeFrame = (overrides: Partial<MockFrame> = {}): MockFrame => ({
 });
 
 const flushPromises = async () => {
-  await Promise.resolve();
-  await Promise.resolve();
+  // Drain the microtask queue enough rounds to settle chained ResultAsync
+  // combinators — the exact hop count is an implementation detail the tests
+  // must not pin.
+  for (const _ of Array.from({ length: 10 })) {
+    await Promise.resolve();
+  }
 };
 
 describe("createSharedTextureReceiver", () => {

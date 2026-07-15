@@ -13,6 +13,15 @@ import { sharedTexture } from "electron";
 import type { WebContents } from "electron";
 import { TextureReceiver, closeNativeHandle } from "@napolab/texture-bridge-core";
 import type { SharedTextureFrame } from "@napolab/texture-bridge-core";
+import { Result, ResultAsync, ok, err, okAsync, errAsync } from "neverthrow";
+import {
+  FrameReceiveError,
+  ReceiverStoppedError,
+  TextureDeliveryError,
+  TextureImportError,
+  UnsupportedPixelFormatError,
+} from "./errors";
+import type { SendPipelineError } from "./errors";
 import { FpsCounter } from "./fps-counter";
 import { toError } from "./to-error";
 
@@ -204,12 +213,7 @@ class SharedTextureReceiverBridgeImpl extends EventEmitter implements SharedText
     this._consecutiveErrors += 1;
     if (this._consecutiveErrors >= MAX_CONSECUTIVE_TICK_ERRORS) {
       this.stop();
-      this.emit(
-        "error",
-        new Error(
-          `shared texture receiver stopped after ${MAX_CONSECUTIVE_TICK_ERRORS} consecutive errors`,
-        ),
-      );
+      this.emit("error", new ReceiverStoppedError(MAX_CONSECUTIVE_TICK_ERRORS));
     }
   }
 
@@ -259,12 +263,16 @@ class SharedTextureReceiverBridgeImpl extends EventEmitter implements SharedText
    * error case return `null` (the tick has nothing further to do either way).
    */
   private _receiveFrame(): SharedTextureFrame | null {
-    try {
-      return this.receiver.receiveSharedTexture();
-    } catch (err) {
-      this._recordTickError(toError(err));
-      return null;
-    }
+    return Result.fromThrowable(
+      () => this.receiver.receiveSharedTexture(),
+      (cause) => new FrameReceiveError(toError(cause).message, { cause }),
+    )().match(
+      (frame) => frame,
+      (error) => {
+        this._recordTickError(error);
+        return null;
+      },
+    );
   }
 
   /** Run `_send()` with the `_inFlight` drop-latest flag held for its duration. */
@@ -280,75 +288,101 @@ class SharedTextureReceiverBridgeImpl extends EventEmitter implements SharedText
   private async _send(frame: SharedTextureFrame): Promise<SendResult> {
     if (this.target.isDestroyed()) {
       // Target is gone — handle was minted but Electron will never consume it.
-      // Release it directly via the native helper so we don't leak
-      // NT HANDLE / IOSurface per frame during window teardown.
       releaseUnconsumedHandle(frame.handle);
       return "skipped";
     }
 
-    if (!isValidPixelFormat(frame.pixelFormat)) {
-      const error = new Error(
-        `shared texture frame has unsupported pixelFormat "${frame.pixelFormat}" (expected one of ${VALID_PIXEL_FORMATS.join(", ")})`,
-      );
-      this.emit("error", error);
-      // Handle was minted but will never reach importSharedTexture — release it
-      // here to avoid leaking an NT HANDLE / IOSurface on unknown pixelFormat.
-      releaseUnconsumedHandle(frame.handle);
-      return "failed";
-    }
-
-    // Wrap the raw handle under the platform-specific key that Electron's
-    // SharedTextureHandle expects.
-    const handle =
-      process.platform === "win32" ? { ntHandle: frame.handle } : { ioSurface: frame.handle };
-
-    const textureInfo: Electron.SharedTextureImportTextureInfo = {
-      codedSize: { width: frame.width, height: frame.height },
-      handle,
-      pixelFormat: frame.pixelFormat,
-    };
-
-    const imported = this._importFrame(textureInfo, frame.handle);
-    if (!imported) return "failed";
-
-    const targetFrame = this.target.mainFrame;
-    if (!targetFrame) {
-      imported.release();
-      return "skipped";
-    }
-
-    try {
-      await sharedTexture.sendSharedTexture(
-        { frame: targetFrame, importedSharedTexture: imported },
-        ...this.extraArgs,
-      );
-      return "delivered";
-    } catch (err) {
-      if (this._disposed) return "skipped";
-      this.emit("error", toError(err));
-      return "failed";
-    } finally {
-      imported.release();
-    }
+    // Both `.match` calls sit at the same consumption edge (the "error"
+    // event). Prepare failures collapse on the sync Result so validation /
+    // import errors emit in the same tick they occur — the pre-neverthrow
+    // behavior the test suite pins — while only delivery is genuinely async.
+    return this._prepare(frame).match(
+      (imported) =>
+        this._deliver(imported).match(
+          (result) => result,
+          (error) => {
+            this.emit("error", error);
+            return "failed" as const;
+          },
+        ),
+      (error) => {
+        this.emit("error", error);
+        return Promise.resolve<SendResult>("failed");
+      },
+    );
   }
 
   /**
-   * Import one frame into Electron. On throw, emits the error, releases the
-   * unconsumed native handle (importSharedTexture threw before taking
-   * ownership — without this we leak a per-frame NT HANDLE / IOSurface), and
-   * returns `null`.
+   * Validate the frame's pixel format and import it into Electron. On any
+   * failure the unconsumed native handle is released here (importSharedTexture
+   * never took ownership — without this we leak a per-frame NT HANDLE /
+   * IOSurface) and the typed error propagates to `_send`'s single `.match`.
    */
-  private _importFrame(
-    textureInfo: Electron.SharedTextureImportTextureInfo,
-    rawHandle: Buffer,
-  ): Electron.SharedTextureImported | null {
-    try {
-      return sharedTexture.importSharedTexture({ textureInfo });
-    } catch (err) {
-      this.emit("error", toError(err));
-      releaseUnconsumedHandle(rawHandle);
-      return null;
+  private _prepare(
+    frame: SharedTextureFrame,
+  ): Result<Electron.SharedTextureImported, SendPipelineError> {
+    return this._validate(frame)
+      .andThen((textureInfo) =>
+        Result.fromThrowable(
+          () => sharedTexture.importSharedTexture({ textureInfo }),
+          (cause) => new TextureImportError(toError(cause).message, { cause }),
+        )(),
+      )
+      .orElse((error) => {
+        releaseUnconsumedHandle(frame.handle);
+        return err(error);
+      });
+  }
+
+  /** Reject unknown pixel formats; wrap the raw handle for Electron. */
+  private _validate(
+    frame: SharedTextureFrame,
+  ): Result<Electron.SharedTextureImportTextureInfo, UnsupportedPixelFormatError> {
+    if (!isValidPixelFormat(frame.pixelFormat)) {
+      return err(new UnsupportedPixelFormatError(frame.pixelFormat, VALID_PIXEL_FORMATS));
     }
+    const handle =
+      process.platform === "win32" ? { ntHandle: frame.handle } : { ioSurface: frame.handle };
+    return ok({
+      codedSize: { width: frame.width, height: frame.height },
+      handle,
+      pixelFormat: frame.pixelFormat,
+    });
+  }
+
+  /**
+   * Deliver one imported texture to the target renderer. Releases `imported`
+   * on every path (the `finally` inside `send`). Disposal mid-send maps the
+   * rejection to `"skipped"` instead of an error, as before.
+   */
+  private _deliver(
+    imported: Electron.SharedTextureImported,
+  ): ResultAsync<SendResult, TextureDeliveryError> {
+    const targetFrame = this.target.mainFrame;
+    if (!targetFrame) {
+      imported.release();
+      return okAsync("skipped");
+    }
+    const send = async (): Promise<void> => {
+      try {
+        await sharedTexture.sendSharedTexture(
+          { frame: targetFrame, importedSharedTexture: imported },
+          ...this.extraArgs,
+        );
+      } finally {
+        imported.release();
+      }
+    };
+    return ResultAsync.fromPromise(
+      send(),
+      (cause) => new TextureDeliveryError(toError(cause).message, { cause }),
+    )
+      .map((): SendResult => "delivered")
+      .orElse((error) =>
+        this._disposed
+          ? okAsync<SendResult, TextureDeliveryError>("skipped")
+          : errAsync<SendResult, TextureDeliveryError>(error),
+      );
   }
 }
 
