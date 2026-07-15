@@ -8,6 +8,7 @@ import {
 import { PreviewManager } from "./preview-manager";
 import { FpsCounter } from "./fps-counter";
 import type { TextureBridgeOptions, TextureBridge } from "./types";
+import { toError } from "./to-error";
 
 /**
  * Convert a pixel-space size to a device-independent (DIP) size for a given
@@ -19,11 +20,11 @@ import type { TextureBridgeOptions, TextureBridge } from "./types";
  * 1097.14 → 1097 → 1097 × 1.75 = 1919.75, which Chromium typically rounds
  * back to 1920).
  */
-export function computeDipSize(
+export const computeDipSize = (
   pixelWidth: number,
   pixelHeight: number,
   scaleFactor: number,
-): { width: number; height: number } {
+): { width: number; height: number } => {
   if (scaleFactor <= 0) {
     return { width: Math.max(1, pixelWidth), height: Math.max(1, pixelHeight) };
   }
@@ -31,7 +32,7 @@ export function computeDipSize(
     width: Math.max(1, Math.round(pixelWidth / scaleFactor)),
     height: Math.max(1, Math.round(pixelHeight / scaleFactor)),
   };
-}
+};
 
 interface PaintEvent extends Event {
   texture?: PaintTexture;
@@ -88,8 +89,7 @@ class TextureBridgeImpl extends EventEmitter implements TextureBridge {
       sendTextureFromPaintEvent(this.sender, texture.textureInfo);
       this.previewManager?.sendFrame(texture);
     } catch (err) {
-      const error = err instanceof Error ? err : new Error(String(err));
-      this.emit("error", error);
+      this.emit("error", toError(err));
     } finally {
       texture.release?.();
     }
@@ -191,9 +191,9 @@ class TextureBridgeImpl extends EventEmitter implements TextureBridge {
  * shared texture. The page itself must use a transparent background
  * (`html, body { background: transparent }`) for the alpha to mean anything.
  */
-export function buildBrowserWindowOptions(
+export const buildBrowserWindowOptions = (
   options: TextureBridgeOptions,
-): Electron.BrowserWindowConstructorOptions {
+): Electron.BrowserWindowConstructorOptions => {
   const { width, height, webPreferences, includeAlpha, pixelExact } = options;
 
   return {
@@ -217,7 +217,7 @@ export function buildBrowserWindowOptions(
     // so both keys must be applied together.
     ...(includeAlpha ? { transparent: true, backgroundColor: "#00000000" } : {}),
   };
-}
+};
 
 /**
  * Create a fully-wired texture bridge: offscreen window, native sender,
@@ -225,7 +225,9 @@ export function buildBrowserWindowOptions(
  *
  * Must be called after `app.whenReady()`.
  */
-export async function createTextureBridge(options: TextureBridgeOptions): Promise<TextureBridge> {
+export const createTextureBridge = async (
+  options: TextureBridgeOptions,
+): Promise<TextureBridge> => {
   if (!app.isReady()) {
     throw new Error("createTextureBridge() must be called after app.whenReady()");
   }
@@ -247,11 +249,9 @@ export async function createTextureBridge(options: TextureBridgeOptions): Promis
   const sender = new TextureSender(name, width, height);
 
   // ---- Preview ----
-  let previewManager: PreviewManager | null = null;
-  if (preview?.enabled !== false && preview) {
-    previewManager = new PreviewManager(width, height, preview);
-    previewManager.open();
-  }
+  const previewManager =
+    preview && preview.enabled !== false ? new PreviewManager(width, height, preview) : null;
+  previewManager?.open();
 
   // ---- Bridge instance ----
   const bridge = new TextureBridgeImpl(renderWindow, sender, previewManager, options);
@@ -264,9 +264,11 @@ export async function createTextureBridge(options: TextureBridgeOptions): Promis
   renderWindow.webContents.setFrameRate(frameRate);
 
   // ---- Load renderer URL ----
-  if (rendererUrl.startsWith("http://") || rendererUrl.startsWith("https://")) {
-    await renderWindow.loadURL(rendererUrl);
-  } else if (rendererUrl.startsWith("file://")) {
+  const isUrlScheme =
+    rendererUrl.startsWith("http://") ||
+    rendererUrl.startsWith("https://") ||
+    rendererUrl.startsWith("file://");
+  if (isUrlScheme) {
     await renderWindow.loadURL(rendererUrl);
   } else {
     await renderWindow.loadFile(rendererUrl);
@@ -275,4 +277,4 @@ export async function createTextureBridge(options: TextureBridgeOptions): Promis
   bridge.emit("ready");
 
   return bridge;
-}
+};

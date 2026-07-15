@@ -1,6 +1,7 @@
 import { EventEmitter } from "events";
 import { listSenders } from "@napolab/texture-bridge-core";
 import type { SenderInfo } from "@napolab/texture-bridge-core";
+import { toError } from "./to-error";
 
 export interface SenderDiscoveryEvents {
   updated: [senders: SenderInfo[]];
@@ -68,8 +69,7 @@ export class SenderDiscovery extends EventEmitter {
         this.emit("updated", current);
       }
     } catch (err) {
-      const error = err instanceof Error ? err : new Error(String(err));
-      this.emit("error", error);
+      this.emit("error", toError(err));
     }
   }
 
