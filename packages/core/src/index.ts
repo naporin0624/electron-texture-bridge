@@ -16,11 +16,14 @@ import type {
 
 // Attach Symbol.dispose to native classes so `using` declarations work.
 // napi-rs cannot expose symbol-named methods, so we patch the prototypes here.
+// `function` expressions (not arrows) are required for the `this` binding.
 if (typeof Symbol.dispose === "symbol") {
-  (TextureSender.prototype as any)[Symbol.dispose] = function () {
+  TextureSender.prototype[Symbol.dispose] = function (this: InstanceType<typeof TextureSender>) {
     this.stop();
   };
-  (TextureReceiver.prototype as any)[Symbol.dispose] = function () {
+  TextureReceiver.prototype[Symbol.dispose] = function (
+    this: InstanceType<typeof TextureReceiver>,
+  ) {
     this.stop();
   };
 }
@@ -44,17 +47,17 @@ export type { SharedTextureFrame } from "@napolab/texture-bridge";
  *
  * Handles platform detection and buffer extraction automatically.
  */
-export function sendTextureFromPaintEvent(
+export const sendTextureFromPaintEvent = (
   sender: InstanceType<typeof TextureSender>,
   textureInfo: TextureInfo | undefined,
-): void {
+): void => {
   if (!textureInfo) return;
   const { handle, codedSize } = textureInfo;
 
   if (process.platform === "win32") {
     const ntHandle = handle.ntHandle;
     if (!ntHandle || !Buffer.isBuffer(ntHandle)) return;
-    const handleValue = Number(ntHandle.readBigInt64LE(0));
+    const handleValue = parseInt(`${ntHandle.readBigInt64LE(0)}`, 10);
     sender.send(handleValue, codedSize.width, codedSize.height);
     return;
   }
@@ -64,4 +67,4 @@ export function sendTextureFromPaintEvent(
     if (!ioSurface) return;
     sender.sendSurface(ioSurface, codedSize.width, codedSize.height);
   }
-}
+};
