@@ -65,13 +65,12 @@ const bootstrap = async (): Promise<void> => {
   // `VideoFrame` and draws it via `drawImage`, which hits the GPU path
   // without any CPU readback or IPC pixel copy.
   type SharedTextureReceiver = ReturnType<typeof createSharedTextureReceiver>;
-  /** Single mutable slot for the currently connected receiver (repo bans `let`). */
-  const receiverSlot = { active: null as SharedTextureReceiver | null };
+  let activeReceiver: SharedTextureReceiver | null = null;
 
   const stopActiveReceiver = (): void => {
-    if (!receiverSlot.active) return;
-    receiverSlot.active.dispose();
-    receiverSlot.active = null;
+    if (!activeReceiver) return;
+    activeReceiver.dispose();
+    activeReceiver = null;
   };
 
   // Receiver window needs `nodeIntegration: true` + `contextIsolation: false`
@@ -129,17 +128,17 @@ const bootstrap = async (): Promise<void> => {
       console.error("[receiver-test] bridge error:", err.message);
     });
     receiver.start();
-    receiverSlot.active = receiver;
+    activeReceiver = receiver;
   });
 
   ipcMain.handle("set-flip-y", (_event, flipY: boolean) => {
-    if (!receiverSlot.active) return;
-    receiverSlot.active.setFlipY(flipY);
+    if (!activeReceiver) return;
+    activeReceiver.setFlipY(flipY);
     console.log(`[receiver-test] live toggle flipY=${flipY}`);
   });
 
   ipcMain.handle("disconnect-receiver", () => {
-    if (receiverSlot.active) {
+    if (activeReceiver) {
       stopActiveReceiver();
       console.log("[receiver-test] disconnected");
     }
