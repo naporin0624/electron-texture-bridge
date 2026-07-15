@@ -54,17 +54,19 @@ export const sendTextureFromPaintEvent = (
   if (!textureInfo) return;
   const { handle, codedSize } = textureInfo;
 
-  if (process.platform === "win32") {
-    const ntHandle = handle.ntHandle;
-    if (!ntHandle || !Buffer.isBuffer(ntHandle)) return;
-    const handleValue = parseInt(`${ntHandle.readBigInt64LE(0)}`, 10);
-    sender.send(handleValue, codedSize.width, codedSize.height);
-    return;
-  }
-
-  if (process.platform === "darwin") {
-    const ioSurface = handle.ioSurface;
-    if (!ioSurface) return;
-    sender.sendSurface(ioSurface, codedSize.width, codedSize.height);
+  switch (process.platform) {
+    case "win32": {
+      const ntHandle = handle.ntHandle;
+      if (!ntHandle || !Buffer.isBuffer(ntHandle)) return;
+      const handleValue = parseInt(`${ntHandle.readBigInt64LE(0)}`, 10);
+      sender.send(handleValue, codedSize.width, codedSize.height);
+      return;
+    }
+    case "darwin": {
+      const ioSurface = handle.ioSurface;
+      if (!ioSurface) return;
+      sender.sendSurface(ioSurface, codedSize.width, codedSize.height);
+      return;
+    }
   }
 };
