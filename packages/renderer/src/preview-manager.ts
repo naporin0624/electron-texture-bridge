@@ -1,6 +1,8 @@
 import { BrowserWindow, ipcMain, sharedTexture } from "electron";
 import path from "path";
 import type { TextureInfo } from "@napolab/texture-bridge-core";
+import { Result, ResultAsync } from "neverthrow";
+import { toError } from "./to-error";
 import type { PreviewOptions } from "./types";
 
 /**
@@ -81,23 +83,29 @@ export class PreviewManager {
   }
 
   sendFrame(texture: { textureInfo: TextureInfo }): void {
-    if (!this.win || this.win.isDestroyed() || !this.ready) return;
+    const win = this.win;
+    if (!win || win.isDestroyed() || !this.ready) return;
 
-    try {
-      const imported = sharedTexture.importSharedTexture({
-        textureInfo: texture.textureInfo,
-      });
-      if (!imported) return;
-
-      sharedTexture
-        .sendSharedTexture({
-          frame: this.win.webContents.mainFrame,
-          importedSharedTexture: imported,
-        })
-        .catch(() => {});
-    } catch {
-      // Ignore preview send errors
-    }
+    // Preview delivery is best-effort by design: both failure channels are
+    // intentionally discarded at this edge (the main bridge already reports
+    // real pipeline errors).
+    void Result.fromThrowable(
+      () => sharedTexture.importSharedTexture({ textureInfo: texture.textureInfo }),
+      toError,
+    )()
+      .asyncAndThen((imported) =>
+        ResultAsync.fromPromise(
+          sharedTexture.sendSharedTexture({
+            frame: win.webContents.mainFrame,
+            importedSharedTexture: imported,
+          }),
+          toError,
+        ),
+      )
+      .match(
+        () => undefined,
+        () => undefined,
+      );
   }
 
   updateSize(width: number, height: number): void {

@@ -1,6 +1,7 @@
 import { EventEmitter } from "events";
 import { listSenders } from "@napolab/texture-bridge-core";
 import type { SenderInfo } from "@napolab/texture-bridge-core";
+import { Result } from "neverthrow";
 import { toError } from "./to-error";
 
 export interface SenderDiscoveryEvents {
@@ -45,31 +46,30 @@ export class SenderDiscovery extends EventEmitter {
   private _refresh(): void {
     if (this._disposed) return;
 
-    try {
-      const current = listSenders();
-      const prev = this._senders;
+    Result.fromThrowable(listSenders, toError)().match(
+      (current) => this._applyUpdate(current),
+      (error) => {
+        this.emit("error", error);
+      },
+    );
+  }
 
-      // Diff: find added senders (in current but not in prev)
-      const added = current.filter((c) => !prev.some((p) => this._isSame(c, p)));
+  /** Diff `current` against the previous snapshot and emit added/removed/updated. */
+  private _applyUpdate(current: SenderInfo[]): void {
+    const prev = this._senders;
+    const added = current.filter((c) => !prev.some((p) => this._isSame(c, p)));
+    const removed = prev.filter((p) => !current.some((c) => this._isSame(c, p)));
 
-      // Diff: find removed senders (in prev but not in current)
-      const removed = prev.filter((p) => !current.some((c) => this._isSame(c, p)));
+    this._senders = current;
 
-      this._senders = current;
-
-      if (added.length > 0) {
-        this.emit("added", added);
-      }
-
-      if (removed.length > 0) {
-        this.emit("removed", removed);
-      }
-
-      if (added.length > 0 || removed.length > 0) {
-        this.emit("updated", current);
-      }
-    } catch (err) {
-      this.emit("error", toError(err));
+    if (added.length > 0) {
+      this.emit("added", added);
+    }
+    if (removed.length > 0) {
+      this.emit("removed", removed);
+    }
+    if (added.length > 0 || removed.length > 0) {
+      this.emit("updated", current);
     }
   }
 
