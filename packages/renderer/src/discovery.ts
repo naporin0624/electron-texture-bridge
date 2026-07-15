@@ -11,6 +11,9 @@ export interface SenderDiscoveryEvents {
   error: [error: Error];
 }
 
+/** `listSenders` with its throw folded into a Result, bound once at module scope. */
+const safeListSenders = Result.fromThrowable(listSenders, toError);
+
 export class SenderDiscovery extends EventEmitter {
   private _senders: SenderInfo[] = [];
   private _timer: ReturnType<typeof setInterval> | null = null;
@@ -46,7 +49,7 @@ export class SenderDiscovery extends EventEmitter {
   private _refresh(): void {
     if (this._disposed) return;
 
-    Result.fromThrowable(listSenders, toError)().match(
+    safeListSenders().match(
       (current) => this._applyUpdate(current),
       (error) => {
         this.emit("error", error);

@@ -61,6 +61,22 @@ const isValidPixelFormat = (value: string): value is SharedTexturePixelFormat =>
  */
 const MAX_CONSECUTIVE_TICK_ERRORS = 10;
 
+/**
+ * Throwable native/Electron calls, each bound once to a named
+ * `Result.fromThrowable` wrapper (arguments are forwarded — no per-call
+ * wrapping, no IIFE-style immediate invocation).
+ */
+const safeReceiveSharedTexture = Result.fromThrowable(
+  (receiver: InstanceType<typeof TextureReceiver>) => receiver.receiveSharedTexture(),
+  (cause) => new FrameReceiveError(toError(cause).message, { cause }),
+);
+
+const safeImportSharedTexture = Result.fromThrowable(
+  (textureInfo: Electron.SharedTextureImportTextureInfo) =>
+    sharedTexture.importSharedTexture({ textureInfo }),
+  (cause) => new TextureImportError(toError(cause).message, { cause }),
+);
+
 export interface SharedTextureReceiverOptions {
   readonly senderName: string;
   readonly appName?: string;
@@ -263,10 +279,7 @@ class SharedTextureReceiverBridgeImpl extends EventEmitter implements SharedText
    * error case return `null` (the tick has nothing further to do either way).
    */
   private _receiveFrame(): SharedTextureFrame | null {
-    return Result.fromThrowable(
-      () => this.receiver.receiveSharedTexture(),
-      (cause) => new FrameReceiveError(toError(cause).message, { cause }),
-    )().match(
+    return safeReceiveSharedTexture(this.receiver).match(
       (frame) => frame,
       (error) => {
         this._recordTickError(error);
@@ -322,12 +335,7 @@ class SharedTextureReceiverBridgeImpl extends EventEmitter implements SharedText
     frame: SharedTextureFrame,
   ): Result<Electron.SharedTextureImported, SendPipelineError> {
     return this._validate(frame)
-      .andThen((textureInfo) =>
-        Result.fromThrowable(
-          () => sharedTexture.importSharedTexture({ textureInfo }),
-          (cause) => new TextureImportError(toError(cause).message, { cause }),
-        )(),
-      )
+      .andThen((textureInfo) => safeImportSharedTexture(textureInfo))
       .orElse((error) => {
         releaseUnconsumedHandle(frame.handle);
         return err(error);

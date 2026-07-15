@@ -14,6 +14,15 @@ const assetPath = (filename: string): string => {
   return path.join(__dirname, "assets", filename);
 };
 
+/**
+ * `importSharedTexture` with its throw folded into a Result, bound once at
+ * module scope (arguments are forwarded — no IIFE-style immediate call).
+ */
+const safeImportSharedTexture = Result.fromThrowable(
+  (textureInfo: TextureInfo) => sharedTexture.importSharedTexture({ textureInfo }),
+  toError,
+);
+
 export class PreviewManager {
   private win: BrowserWindow | null = null;
   private ready = false;
@@ -89,10 +98,7 @@ export class PreviewManager {
     // Preview delivery is best-effort by design: both failure channels are
     // intentionally discarded at this edge (the main bridge already reports
     // real pipeline errors).
-    void Result.fromThrowable(
-      () => sharedTexture.importSharedTexture({ textureInfo: texture.textureInfo }),
-      toError,
-    )()
+    void safeImportSharedTexture(texture.textureInfo)
       .asyncAndThen((imported) =>
         ResultAsync.fromPromise(
           sharedTexture.sendSharedTexture({
