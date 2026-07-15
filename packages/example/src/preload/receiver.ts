@@ -37,11 +37,9 @@ const state = {
   mainFps: 0,
 };
 
-/** Mutable slot filled on DOMContentLoaded (repo bans `let`). */
-const uiSlot = { current: null as ReceiverUI | null };
+let ui: ReceiverUI | null = null;
 
 const formatInfo = () => {
-  const ui = uiSlot.current;
   if (!ui) return;
   ui.info.textContent =
     `${ui.canvas.width}x${ui.canvas.height} | render ${state.renderFps.toFixed(1)} fps | ` +
@@ -56,7 +54,6 @@ const formatInfo = () => {
 // vsync of latency without reducing GPU work.
 consumeSharedTexture({
   onFrame: ({ videoFrame }) => {
-    const ui = uiSlot.current;
     if (!ui) return;
     if (
       ui.canvas.width !== videoFrame.displayWidth ||
@@ -90,7 +87,6 @@ ipcRenderer.on("receiver-fps", (_event, fps: number) => {
 });
 
 const refreshSenders = async (): Promise<void> => {
-  const ui = uiSlot.current;
   if (!ui) return;
   const senders: SenderEntry[] = await ipcRenderer.invoke("list-senders");
   ui.senderList.innerHTML = '<option value="">-- Select Sender --</option>';
@@ -132,7 +128,7 @@ window.addEventListener("DOMContentLoaded", () => {
     return;
   }
 
-  uiSlot.current = {
+  ui = {
     canvas,
     ctx,
     info,
