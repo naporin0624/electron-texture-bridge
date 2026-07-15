@@ -74,6 +74,15 @@ const dispatchSend = (
 };
 
 /**
+ * `dispatchSend` with its throw folded into `Result<void, TextureSendError>`.
+ * Bound once at module scope — `Result.fromThrowable` forwards the arguments.
+ */
+const safeDispatchSend = Result.fromThrowable(
+  dispatchSend,
+  (cause) => new TextureSendError(cause instanceof Error ? cause.message : `${cause}`, { cause }),
+);
+
+/**
  * Send a texture from an Electron paint event to Syphon/Spout.
  *
  * Handles platform detection and buffer extraction automatically. The native
@@ -87,12 +96,7 @@ export const sendTextureFromPaintEvent = (
   textureInfo: TextureInfo | undefined,
 ): void => {
   if (!textureInfo) return;
-  Result.fromThrowable(
-    () => {
-      dispatchSend(sender, textureInfo);
-    },
-    (cause) => new TextureSendError(cause instanceof Error ? cause.message : `${cause}`, { cause }),
-  )().match(
+  safeDispatchSend(sender, textureInfo).match(
     () => undefined,
     (error) => {
       throw error;
