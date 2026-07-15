@@ -1,4 +1,4 @@
-import { Result, ok } from "neverthrow";
+import { Result } from "neverthrow";
 import {
   TextureSender,
   TextureReceiver,
@@ -47,8 +47,8 @@ export type { SharedTextureFrame } from "@napolab/texture-bridge";
 
 /**
  * Platform dispatch onto the native sender. `send()` / `sendSurface()` can
- * throw (e.g. "TextureSender has been stopped") — callers go through the
- * `Result`-returning wrapper below.
+ * throw (e.g. "TextureSender has been stopped") — the public entry point
+ * below folds that throw through `Result.fromThrowable`.
  */
 const dispatchSend = (
   sender: InstanceType<typeof TextureSender>,
@@ -74,39 +74,25 @@ const dispatchSend = (
 };
 
 /**
- * Send a texture from an Electron paint event to Syphon/Spout, with the
- * native `send()` / `sendSurface()` throw folded into a typed `Result`.
- *
- * Handles platform detection and buffer extraction automatically. On failure
- * the original message is preserved and the thrown value rides on
- * `Error.cause`. A missing `textureInfo` or handle is a no-op `ok`, matching
- * the void variant.
- */
-export const sendTextureFromPaintEventResult = (
-  sender: InstanceType<typeof TextureSender>,
-  textureInfo: TextureInfo | undefined,
-): Result<void, TextureSendError> => {
-  if (!textureInfo) return ok(undefined);
-  return Result.fromThrowable(
-    () => {
-      dispatchSend(sender, textureInfo);
-    },
-    (cause) => new TextureSendError(cause instanceof Error ? cause.message : `${cause}`, { cause }),
-  )();
-};
-
-/**
  * Send a texture from an Electron paint event to Syphon/Spout.
  *
- * Handles platform detection and buffer extraction automatically. Throwing
- * variant kept for backward compatibility — prefer
- * `sendTextureFromPaintEventResult` and `.match` at your consumption edge.
+ * Handles platform detection and buffer extraction automatically. The native
+ * `send()` / `sendSurface()` throw is wrapped with `Result.fromThrowable` and
+ * consumed here with `.match` — the `Result` never crosses the public API. On
+ * failure a `TextureSendError` is thrown with the original message preserved
+ * and the thrown value on `Error.cause`.
  */
 export const sendTextureFromPaintEvent = (
   sender: InstanceType<typeof TextureSender>,
   textureInfo: TextureInfo | undefined,
 ): void => {
-  sendTextureFromPaintEventResult(sender, textureInfo).match(
+  if (!textureInfo) return;
+  Result.fromThrowable(
+    () => {
+      dispatchSend(sender, textureInfo);
+    },
+    (cause) => new TextureSendError(cause instanceof Error ? cause.message : `${cause}`, { cause }),
+  )().match(
     () => undefined,
     (error) => {
       throw error;
