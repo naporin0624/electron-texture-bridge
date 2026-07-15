@@ -2,6 +2,7 @@ import { EventEmitter } from "events";
 import { TextureReceiver } from "@napolab/texture-bridge-core";
 import type { ReceivedFrame } from "@napolab/texture-bridge-core";
 import { FpsCounter } from "./fps-counter";
+import { toError } from "./to-error";
 
 export interface TextureReceiverBridgeOptions {
   senderName: string;
@@ -96,8 +97,7 @@ class TextureReceiverBridgeImpl extends EventEmitter implements TextureReceiverB
         this.emit("fps", fps);
       }
     } catch (err) {
-      const error = err instanceof Error ? err : new Error(String(err));
-      this.emit("error", error);
+      this.emit("error", toError(err));
     }
   }
 
@@ -109,16 +109,15 @@ class TextureReceiverBridgeImpl extends EventEmitter implements TextureReceiverB
       if (!frame) return;
       this._onFrame(frame);
     } catch (err) {
-      const error = err instanceof Error ? err : new Error(String(err));
-      this.emit("error", error);
+      this.emit("error", toError(err));
     }
   }
 }
 
-export function createTextureReceiver(
+export const createTextureReceiver = (
   options: TextureReceiverBridgeOptions,
-): TextureReceiverBridge {
+): TextureReceiverBridge => {
   const { senderName, appName, serverUuid, pollIntervalMs = 16 } = options;
   const receiver = new TextureReceiver(senderName, appName, serverUuid);
   return new TextureReceiverBridgeImpl(receiver, pollIntervalMs);
-}
+};
