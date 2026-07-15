@@ -14,14 +14,14 @@ import { listSenders } from "@napolab/texture-bridge";
 app.commandLine.appendSwitch("enable-features", "SharedArrayBuffer");
 app.commandLine.appendSwitch("force-device-scale-factor", "1");
 
-function getRendererUrl(): string {
+const getRendererUrl = (): string => {
   if (process.env.ELECTRON_RENDERER_URL) {
     return `${process.env.ELECTRON_RENDERER_URL}/index.html`;
   }
   return path.join(__dirname, "../renderer/index.html");
-}
+};
 
-app.whenReady().then(async () => {
+const bootstrap = async (): Promise<void> => {
   console.log("[example] app ready");
   console.log(`[example] Electron: ${process.versions.electron}`);
 
@@ -65,13 +65,13 @@ app.whenReady().then(async () => {
   // `VideoFrame` and draws it via `drawImage`, which hits the GPU path
   // without any CPU readback or IPC pixel copy.
   type SharedTextureReceiver = ReturnType<typeof createSharedTextureReceiver>;
-  let activeReceiver: SharedTextureReceiver | null = null;
+  /** Single mutable slot for the currently connected receiver (repo bans `let`). */
+  const receiverSlot = { active: null as SharedTextureReceiver | null };
 
-  const stopActiveReceiver = () => {
-    if (activeReceiver) {
-      activeReceiver.dispose();
-      activeReceiver = null;
-    }
+  const stopActiveReceiver = (): void => {
+    if (!receiverSlot.active) return;
+    receiverSlot.active.dispose();
+    receiverSlot.active = null;
   };
 
   // Receiver window needs `nodeIntegration: true` + `contextIsolation: false`
@@ -114,31 +114,32 @@ app.whenReady().then(async () => {
     stopActiveReceiver();
     console.log(`[receiver-test] connecting to "${senderName}" (zero-copy, flipY=${flipY})`);
 
-    activeReceiver = createSharedTextureReceiver({
+    const receiver = createSharedTextureReceiver({
       senderName,
       target: receiverWindow.webContents,
       pollIntervalMs: 8,
       flipY,
     });
-    activeReceiver.on("fps", (fps) => {
+    receiver.on("fps", (fps) => {
       if (!receiverWindow.isDestroyed()) {
         receiverWindow.webContents.send("receiver-fps", fps);
       }
     });
-    activeReceiver.on("error", (err) => {
+    receiver.on("error", (err) => {
       console.error("[receiver-test] bridge error:", err.message);
     });
-    activeReceiver.start();
+    receiver.start();
+    receiverSlot.active = receiver;
   });
 
   ipcMain.handle("set-flip-y", (_event, flipY: boolean) => {
-    if (!activeReceiver) return;
-    activeReceiver.setFlipY(flipY);
+    if (!receiverSlot.active) return;
+    receiverSlot.active.setFlipY(flipY);
     console.log(`[receiver-test] live toggle flipY=${flipY}`);
   });
 
   ipcMain.handle("disconnect-receiver", () => {
-    if (activeReceiver) {
+    if (receiverSlot.active) {
       stopActiveReceiver();
       console.log("[receiver-test] disconnected");
     }
@@ -151,7 +152,9 @@ app.whenReady().then(async () => {
     ipcMain.removeHandler("set-flip-y");
     ipcMain.removeHandler("disconnect-receiver");
   });
-});
+};
+
+void app.whenReady().then(bootstrap);
 
 app.on("window-all-closed", () => {
   app.quit();

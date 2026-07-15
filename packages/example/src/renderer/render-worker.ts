@@ -17,12 +17,20 @@ declare const self: DedicatedWorkerGlobalScope;
 // Worker State
 // ============================================================================
 
-let renderer: THREE.WebGLRenderer | null = null;
-let scene: THREE.Scene | null = null;
-let camera: THREE.OrthographicCamera | null = null;
-let material: THREE.ShaderMaterial | null = null;
-let startTime: number = 0;
-let canvasSize = { width: 1920, height: 1080 };
+/** Everything `init()` creates — present together or not at all. */
+interface RenderContext {
+  renderer: THREE.WebGLRenderer;
+  scene: THREE.Scene;
+  camera: THREE.OrthographicCamera;
+  material: THREE.ShaderMaterial;
+}
+
+/** Module-level mutable state; property writes only (repo bans `let`). */
+const worker = {
+  context: null as RenderContext | null,
+  startTime: 0,
+  canvasSize: { width: 1920, height: 1080 },
+};
 
 const audioData = {
   bass: 0,
@@ -32,46 +40,47 @@ const audioData = {
 };
 
 // ============================================================================
-// Message Handler
+// Rendering
 // ============================================================================
 
-self.onmessage = (e: MessageEvent) => {
-  const { type, ...data } = e.data;
-
-  switch (type) {
-    case "init":
-      init(data.canvas as OffscreenCanvas);
-      break;
-
-    case "resize":
-      resize(data.width, data.height);
-      break;
-
-    case "audio":
-      audioData.bass = lerp(audioData.bass, data.bass ?? audioData.bass, 0.3);
-      audioData.mid = lerp(audioData.mid, data.mid ?? audioData.mid, 0.3);
-      audioData.high = lerp(audioData.high, data.high ?? audioData.high, 0.3);
-      break;
-
-    case "beat":
-      audioData.beat = 1.0;
-      break;
-  }
+const lerp = (a: number, b: number, t: number): number => {
+  return a + (b - a) * t;
 };
 
-function lerp(a: number, b: number, t: number): number {
-  return a + (b - a) * t;
-}
+const animate = (): void => {
+  requestAnimationFrame(animate);
 
-// ============================================================================
-// Three.js Initialization
-// ============================================================================
+  const context = worker.context;
+  if (!context) return;
 
-function init(canvas: OffscreenCanvas) {
-  canvasSize = { width: canvas.width, height: canvas.height };
-  startTime = performance.now();
+  const elapsed = (performance.now() - worker.startTime) / 1000;
+  context.material.uniforms.u_time.value = elapsed;
+  context.material.uniforms.u_bass.value = audioData.bass;
+  context.material.uniforms.u_mid.value = audioData.mid;
+  context.material.uniforms.u_high.value = audioData.high;
+  context.material.uniforms.u_beat.value = audioData.beat;
 
-  renderer = new THREE.WebGLRenderer({
+  audioData.beat *= 0.92;
+
+  context.renderer.render(context.scene, context.camera);
+};
+
+const resize = (width: number, height: number): void => {
+  const context = worker.context;
+  if (!context) return;
+
+  worker.canvasSize = { width, height };
+  context.renderer.setSize(width, height, false);
+  context.material.uniforms.u_resolution.value.set(width, height);
+
+  console.log(`[render-worker] Resized to ${width}x${height}`);
+};
+
+const init = (canvas: OffscreenCanvas): void => {
+  worker.canvasSize = { width: canvas.width, height: canvas.height };
+  worker.startTime = performance.now();
+
+  const renderer = new THREE.WebGLRenderer({
     canvas: canvas as unknown as HTMLCanvasElement,
     antialias: true,
     // alpha:true + clearAlpha:0 lets the fragment shader's gl_FragColor.a
@@ -84,21 +93,21 @@ function init(canvas: OffscreenCanvas) {
   });
 
   // updateStyle: false is required for OffscreenCanvas (no style property)
-  renderer.setSize(canvasSize.width, canvasSize.height, false);
+  renderer.setSize(worker.canvasSize.width, worker.canvasSize.height, false);
   renderer.setPixelRatio(1);
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.setClearColor(0x000000, 0);
 
-  scene = new THREE.Scene();
-  camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+  const scene = new THREE.Scene();
+  const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
 
-  material = new THREE.ShaderMaterial({
+  const material = new THREE.ShaderMaterial({
     vertexShader,
     fragmentShader,
     uniforms: {
       u_time: { value: 0.0 },
       u_resolution: {
-        value: new THREE.Vector2(canvasSize.width, canvasSize.height),
+        value: new THREE.Vector2(worker.canvasSize.width, worker.canvasSize.height),
       },
       u_bass: { value: 0.0 },
       u_mid: { value: 0.0 },
@@ -113,38 +122,48 @@ function init(canvas: OffscreenCanvas) {
   const mesh = new THREE.Mesh(geometry, material);
   scene.add(mesh);
 
+  worker.context = { renderer, scene, camera, material };
+
   animate();
 
   console.log("[render-worker] Three.js initialized with raymarching shader");
-}
-
-function resize(width: number, height: number) {
-  if (!renderer || !material) return;
-
-  canvasSize = { width, height };
-  renderer.setSize(width, height, false);
-  material.uniforms.u_resolution.value.set(width, height);
-
-  console.log(`[render-worker] Resized to ${width}x${height}`);
-}
+};
 
 // ============================================================================
-// Animation Loop
+// Message Handler
 // ============================================================================
 
-function animate() {
-  requestAnimationFrame(animate);
+type WorkerEvent =
+  | { type: "init"; canvas: OffscreenCanvas }
+  | { type: "resize"; width: number; height: number }
+  | { type: "audio"; bass?: number; mid?: number; high?: number }
+  | { type: "beat" };
 
-  if (!renderer || !scene || !camera || !material) return;
+self.onmessage = (e: MessageEvent<WorkerEvent>) => {
+  const msg = e.data;
 
-  const elapsed = (performance.now() - startTime) / 1000;
-  material.uniforms.u_time.value = elapsed;
-  material.uniforms.u_bass.value = audioData.bass;
-  material.uniforms.u_mid.value = audioData.mid;
-  material.uniforms.u_high.value = audioData.high;
-  material.uniforms.u_beat.value = audioData.beat;
+  switch (msg.type) {
+    case "init":
+      init(msg.canvas);
+      break;
 
-  audioData.beat *= 0.92;
+    case "resize":
+      resize(msg.width, msg.height);
+      break;
 
-  renderer.render(scene, camera);
-}
+    case "audio":
+      audioData.bass = lerp(audioData.bass, msg.bass ?? audioData.bass, 0.3);
+      audioData.mid = lerp(audioData.mid, msg.mid ?? audioData.mid, 0.3);
+      audioData.high = lerp(audioData.high, msg.high ?? audioData.high, 0.3);
+      break;
+
+    case "beat":
+      audioData.beat = 1.0;
+      break;
+
+    default: {
+      const _exhaustive: never = msg;
+      throw new Error(`unhandled worker message: ${JSON.stringify(_exhaustive)}`);
+    }
+  }
+};
