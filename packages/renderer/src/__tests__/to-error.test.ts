@@ -21,4 +21,11 @@ describe("toError", () => {
     expect(toError(undefined).message).toBe("undefined");
     expect(toError(null).message).toBe("null");
   });
+
+  it("preserves the original non-Error value on Error.cause", () => {
+    expect(toError("boom").cause).toBe("boom");
+    expect(toError(42).cause).toBe(42);
+    const thrown = { code: "EFAIL" };
+    expect(toError(thrown).cause).toBe(thrown);
+  });
 });
