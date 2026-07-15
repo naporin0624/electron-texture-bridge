@@ -46,7 +46,7 @@ export interface WorkerRendererHandle {
  *
  * This runs in the renderer process (browser context) only.
  */
-export function createWorkerRenderer(options: WorkerRendererOptions): WorkerRendererHandle {
+export const createWorkerRenderer = (options: WorkerRendererOptions): WorkerRendererHandle => {
   const { worker, width, height } = options;
 
   const canvas = options.canvas ?? document.createElement("canvas");
@@ -62,17 +62,16 @@ export function createWorkerRenderer(options: WorkerRendererOptions): WorkerRend
   const initMsg: MainToWorkerMessage = { type: "init", canvas: offscreen };
   worker.postMessage(initMsg, [offscreen]);
 
-  let lastW = width;
-  let lastH = height;
+  const lastSize = { width, height };
 
   const observer = new ResizeObserver((entries) => {
     for (const entry of entries) {
       const { width: w, height: h } = entry.contentRect;
       const rw = Math.round(w);
       const rh = Math.round(h);
-      if (rw === lastW && rh === lastH) continue;
-      lastW = rw;
-      lastH = rh;
+      if (rw === lastSize.width && rh === lastSize.height) continue;
+      lastSize.width = rw;
+      lastSize.height = rh;
       const msg: MainToWorkerMessage = { type: "resize", width: rw, height: rh };
       worker.postMessage(msg);
     }
@@ -87,4 +86,4 @@ export function createWorkerRenderer(options: WorkerRendererOptions): WorkerRend
       observer.disconnect();
     },
   };
-}
+};
