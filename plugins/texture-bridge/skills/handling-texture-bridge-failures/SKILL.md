@@ -16,14 +16,14 @@ Failures in this library take five shapes, and **which shape a given call uses i
 | `await createTextureBridge(options)` | **rejects** — called before `app.whenReady()`, native sender construction, renderer load failure |
 | `bridge.resize(w, h)` | **throws** — rebuilding the native sender can fail. Size is rolled back first, so the bridge stays usable |
 | `bridge.openPreview()` | **throws** — `new BrowserWindow` inside can fail |
-| `bridge.forwardFrames(target, opts?)` | **cannot fail** — returns an inert `FrameForward` when the bridge is disposed or the target is dead |
+| `bridge.forwardFrames(target, opts?)` | **cannot fail** — returns an inert `FrameForward` when the bridge is disposed or the target is dead. Read `.active` to tell the two apart |
 | `forward.dispose()`, `bridge.dispose()`, `bridge.closePreview()`, `sender.stop()`, receiver `start()` / `stop()` / `dispose()` / `setFlipY()` | **cannot fail** — idempotent |
 | `sendTextureFromPaintEvent(sender, textureInfo)` | **returns a `PaintDefect`** for drops **and throws `TextureSendError`** on native send failure — both, on the same call |
 | `forwardSharedTexture(textureInfo, target, extraArgs?)` | **returns a `ForwardDefect`** — never throws, never rejects |
 | `sendImportedTexture(frame, imported, extraArgs?)` | **rejects** — async fn, so never a sync throw |
 | `new TextureSender(...)`, `sender.send/sendSurface/sendRgbaBuffer`, `closeNativeHandle(buf)`, `listSenders()` | **throw** (native) |
 | `createTextureReceiver(opts)`, `createSharedTextureReceiver(opts)` | **throw** — construction only (no such sender). `createSharedTextureReceiver` also throws `TypeError` for a non-positive `pollIntervalMs`; `createTextureReceiver` does not validate it |
-| `bridge` paint pipeline, receiver poll loops, `SenderDiscovery` | **emit** — `"error"`, plus `"frameDropped"` (`PaintDefect`) on a bridge. Forward failures are discarded and reach neither |
+| `bridge` paint pipeline, receiver poll loops, `SenderDiscovery` | **emit** — `"error"`, plus `"frameDropped"` (`PaintDefect`) on a bridge. Forward failures reach neither: they surface on `"forwardStatus"` (and `options.onStatus`) as state changes |
 | `getPlatform()`, `sender.platform()`, `receiver.isConnected/getWidth/getHeight`, `bridge.isDisposed` | **cannot fail** — safe defaults |
 
 ## What to wrap
@@ -54,6 +54,8 @@ receiver.on("error", (error) => telemetry.report("receiver.error", error)); // t
 ## Two facts that decide most of the code
 
 **A defect is not an error.** `PaintDefect` and `ForwardDefect` are normal dropped frames — a paint arrived without a shareable handle, a monitor window closed. Count them, show them in a HUD, alert on a sustained rate. Reporting each one as an error buries the real failures.
+
+**But a defect that never stops is an incident.** `"forwardStatus"` already does the counting for you: it is deduped down to transitions, so every event it delivers is a genuine change of state. One `{ ok: false }` with no `{ ok: true }` behind it means that target has been dark ever since — log both edges and the outage interval reads straight out of the log.
 
 **`sendTextureFromPaintEvent` is the one call that does both.** Handling only its return value silently drops `TextureSendError`, which means a dead sender — black Syphon output — with nothing in telemetry. In a bridge, that throw already reaches `bridge.on("error")`. In your own paint loop, it is yours:
 
@@ -86,4 +88,6 @@ win.webContents.on("paint", (e) => {          // stays sync
 | `.catch()` on `forwardSharedTexture(...)` | It resolves its defect, never rejects. The handler is dead code. |
 | Reporting a `PaintDefect` / `ForwardDefect` through the error channel | A dropped frame is not an incident. Count it. |
 | `bridge.resize(w, h)` unguarded in a settings-dialog handler | An uncaught throw in the main process takes the app down. This is one of the two throwing bridge methods. |
-| Assuming the bridge's `"frameDropped"` / `"error"` covers forwarding | Forward failures are discarded by contract and reach neither event. |
+| Assuming the bridge's `"frameDropped"` / `"error"` covers forwarding | Forwarding has its own channel: `"forwardStatus"` / `options.onStatus`. Neither of the other two ever fires for it. |
+| Subscribing to nothing and calling forwarding "best-effort" | Best-effort means *the stream survives failures*, not *failures are invisible*. An unwatched forward that dies looks identical to a healthy one at every other layer — paint, sender, preview and `droppedReason` all stay green while the monitor sits black. |
+| Treating `forwardFrames()` as proof the wiring is live | A refused registration returns a handle too. `if (!forward.active)` right after the call is the one-line check that catches it. |

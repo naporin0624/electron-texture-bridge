@@ -1,5 +1,6 @@
 import type { BrowserWindow, WebContents } from "electron";
 import type { PaintDefect } from "@napolab/texture-bridge-core";
+import type { ForwardDefect } from "@napolab/texture-bridge-core/electron";
 
 /** Options for the preview window */
 export interface PreviewOptions {
@@ -96,20 +97,69 @@ export interface BridgeEvents {
    * keeps the last drop reason until a successful send or a reason change.
    */
   frameDropped: [defect: PaintDefect];
+  /**
+   * The delivery state of one `forwardFrames` registration changed. Fires on
+   * the first successful frame, on the first failure, on a change of failure
+   * reason, and once again on recovery — never per frame. Which registration
+   * it refers to is identified by `extraArgs` (the tag passed to
+   * {@link TextureBridge.forwardFrames}).
+   *
+   * Forwarding is best-effort and never surfaces as an `"error"` event: this
+   * is the only channel that reports it. Without it a monitor window can go
+   * black indefinitely while paint, sender and preview all stay healthy.
+   */
+  forwardStatus: [status: ForwardStatusEvent];
   disposed: [];
   resize: [width: number, height: number];
 }
+
+/**
+ * 転送先 1 つ分の配信状態。失敗の立ち上がりと復帰を 1 本のチャネルで表す
+ * 判別可能ユニオン — 「今どちらなのか」を分岐で必ず読ませるための形。
+ */
+export type ForwardStatus =
+  | { readonly ok: true }
+  | {
+      readonly ok: false;
+      readonly reason: ForwardDefect["reason"];
+      /** `target-destroyed` には原因例外が無いので省略される */
+      readonly cause?: Error;
+    };
+
+/**
+ * `forwardStatus` イベントの payload。どの登録の話かは `extraArgs`
+ * (= {@link FrameForwardOptions.extraArgs}) で識別する。
+ */
+export type ForwardStatusEvent = ForwardStatus & { readonly extraArgs: readonly unknown[] };
 
 /** Options for {@link TextureBridge.forwardFrames} */
 export interface FrameForwardOptions {
   /** consumeSharedTexture の handler に varargs で届くタグ(例: slot 番号) */
   readonly extraArgs?: readonly unknown[];
+  /**
+   * この登録の配信状態が変わったときだけ呼ばれる。`forwardStatus` イベントと
+   * 同じ遷移を、対象を絞った形で受け取るための口 — 転送先ごとに別々の宛先へ
+   * ログを出す呼び出し側は、こちらの方が相関付けが要らない。
+   *
+   * best-effort な監視チャネルなので、ここで throw しても転送は止まらない
+   * (例外は握られ、`console.error` に落ちる)。
+   */
+  readonly onStatus?: (status: ForwardStatus) => void;
 }
 
 /** Handle returned by {@link TextureBridge.forwardFrames} */
 export interface FrameForward {
   /** 転送登録を解除する。冪等 */
   dispose(): void;
+  /**
+   * 登録が生きているか。`false` ならこの handle にフレームは流れない —
+   * 登録自体が拒否された(bridge が dispose 済み / target が破壊済み)場合と、
+   * `dispose()` 済み、target が後から破壊された場合を区別せずに表す。
+   *
+   * 登録の拒否は 0.14 まで無言だった。呼び出し側は登録直後にこれを見ることで
+   * 「配線したつもりで 1 枚も流れない」状態を即座に検出できる。
+   */
+  readonly active: boolean;
 }
 
 /** High-level texture bridge handle */
@@ -143,8 +193,10 @@ export interface TextureBridge {
    * Register a `WebContents` (e.g. a monitor/multiviewer window) to receive
    * every subsequent paint frame via zero-copy shared-texture forwarding.
    * Same best-effort contract as the preview path: forward failures
-   * (`ForwardDefect`, from `forwardSharedTexture`) are discarded by this
-   * driver and never surface as an `"error"` event — the receiving end is
+   * (`ForwardDefect`, from `forwardSharedTexture`) never surface as an
+   * `"error"` event and never stop the stream — they are reported as state
+   * transitions through the `forwardStatus` event and
+   * {@link FrameForwardOptions.onStatus} — the receiving end is
    * `installSharedTextureReceiver` / `consumeSharedTexture` on
    * `@napolab/texture-bridge-renderer/client`. Call `dispose()` on the
    * returned {@link FrameForward} to stop forwarding to that target
@@ -156,8 +208,10 @@ export interface TextureBridge {
    * release only after all sends settle" — deferred as YAGNI until a
    * multi-target workload actually needs it.
    *
-   * Calling this after the bridge has been disposed returns an inert
-   * {@link FrameForward} whose `dispose()` is a no-op — it does not register.
+   * Calling this after the bridge has been disposed — or against an
+   * already-destroyed `target` — returns an inert {@link FrameForward} whose
+   * `dispose()` is a no-op and whose `active` is `false`; it does not
+   * register. Check `active` at the call site to catch a refused wiring.
    */
   forwardFrames(target: WebContents, options?: FrameForwardOptions): FrameForward;
 

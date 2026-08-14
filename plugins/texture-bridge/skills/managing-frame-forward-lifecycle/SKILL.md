@@ -16,8 +16,9 @@ description: Use when registering or tearing down `TextureBridge.forwardFrames` 
 | Target `WebContents` destroyed later (its window closed) | Entry is auto-pruned via an internal `once("destroyed")` — no forwarding to a dead target | nothing |
 | `forward.dispose()` | Deletes the entry **and removes that internal `"destroyed"` listener** from your target. Idempotent, never throws, safe after the target died | call it (see below) |
 | `bridge.dispose()` | Unhooks every entry's listener, then clears all entries | nothing |
-| `forwardFrames()` after `bridge.dispose()` | Does **not** register; returns an inert `FrameForward` whose `dispose()` is a no-op | see "own the truth" below |
-| `forwardFrames()` with an already-destroyed target | Same — inert handle, no registration, no leak | same |
+| `forwardFrames()` after `bridge.dispose()` | Does **not** register; returns an inert `FrameForward` whose `dispose()` is a no-op and whose `active` is `false` | see "own the truth" below |
+| `forwardFrames()` with an already-destroyed target | Same — inert handle, `active: false`, no registration, no leak | same |
+| A live registration stops delivering (target dies mid-session, import or send fails) | Reports the change on `"forwardStatus"` / `options.onStatus`, and keeps trying every frame | log both edges (see 4) |
 
 Repeated connect/disconnect on one long-lived multiviewer window accumulates nothing: each `dispose()` takes its listener with it.
 
@@ -25,7 +26,9 @@ Repeated connect/disconnect on one long-lived multiviewer window accumulates not
 
 1. **Dispose before you drop the handle.** Overwriting a `Map` entry that holds a live `FrameForward` leaks the registration — the library cannot see your map.
 2. **Re-register after the target window is recreated.** A reopened window is a new `WebContents`; the old entry already pruned itself, so connect again against the new one.
-3. **Own the truth of your own connected state — and throw when it is false.** Registration is silent: an inert handle looks exactly like a live one, and no event ever fires. Check `bridge.isDisposed` / `target.isDestroyed()` *yourself, before registering*, and **throw a named error** when the check fails. Do not return a boolean or an `undefined` handle: a status a caller can ignore is a UI that says "connected" over a dead deck.
+3. **Own the truth of your own connected state — and throw when it is false.** A refused registration still hands you a handle; what it does not hand you is frames. `FrameForward.active` is `false` in that case, so the failure is detectable — but detectable is not the same as handled. Check `bridge.isDisposed` / `target.isDestroyed()` *yourself, before registering*, and **throw a named error** when the check fails; assert `forward.active` after the call as the backstop for whatever your pre-check missed. Do not return a boolean or an `undefined` handle: a status a caller can ignore is a UI that says "connected" over a dead deck.
+
+4. **Subscribe to `forwardStatus` (or pass `onStatus`) for the deaths that happen later.** Registration succeeding says nothing about the next hour: the target can die, an import can start failing, and forwarding is best-effort — the stream survives, silently. The event is deduped to transitions, so a plain log of every status is already an outage report: `{ ok: false }` with no `{ ok: true }` after it means that target has been dark since that timestamp. Tag each registration with `extraArgs` so the log says *which* one.
 
 ```typescript
 export class ForwardTargetUnavailableError extends Error {
@@ -79,4 +82,5 @@ Which bridge calls throw, reject, or model their failures instead: see the handl
 | `throw` from inside a paint-rate path, or a `"destroyed"` handler | Throw at *registration*, where a human action is waiting for an answer. Per-frame failures stay best-effort. |
 | `forwards.set(slot, bridge.forwardFrames(...))` over an existing entry | The overwritten handle is unreachable and still registered — the one real leak in this API. |
 | Keeping decks "connected" across a window close and expecting frames after reopen | The old entry self-pruned. New window = new `WebContents` = new `forwardFrames` call. |
-| Expecting forward failures on `bridge.on("error")` / `frameDropped` | Best-effort by contract: defects are discarded by the driver. |
+| Expecting forward failures on `bridge.on("error")` / `frameDropped` | Wrong channel — forwarding reports on `"forwardStatus"` / `options.onStatus`. |
+| Registering forwards and subscribing to nothing | The one failure mode with no other symptom: paint, sender and preview stay healthy while the monitor goes black. One `forwardStatus` listener is the whole fix. |

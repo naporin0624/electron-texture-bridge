@@ -82,7 +82,7 @@ import { BrowserWindow } from "electron";
 import { TextureSender, sendTextureFromPaintEvent } from "@napolab/texture-bridge-core";
 import type { PaintDefect, PaintTexture } from "@napolab/texture-bridge-core";
 import type { ForwardDefect } from "@napolab/texture-bridge-core/electron";
-import type { TextureBridgeOptions } from "../types";
+import type { ForwardStatus, ForwardStatusEvent, TextureBridgeOptions } from "../types";
 import type { PreviewManager } from "../preview-manager";
 
 // Module-scope so both `TextureBridgeImpl.handlePaint — frameDropped` and
@@ -990,5 +990,233 @@ describe("TextureBridgeImpl.forwardFrames", () => {
     expect(forwardSharedTextureMock).not.toHaveBeenCalled();
 
     expect(() => forward.dispose()).not.toThrow();
+  });
+});
+
+// forwardFrames の配信状態は 0.14 まで完全に不可視だった(defect は catch で捨てられ、
+// 登録失敗は inert handle で黙殺)。本番で「paint は正常なのにプレビューだけ無言で死ぬ」
+// 事故が起きても切り分ける手段が無かったため、状態遷移を 1 本のチャネルで出す。
+describe("TextureBridgeImpl.forwardFrames — status observability", () => {
+  const makeTexture = () => ({
+    textureInfo: {
+      pixelFormat: "bgra" as const,
+      codedSize: { width: 16, height: 9 },
+      visibleRect: { x: 0, y: 0, width: 16, height: 9 },
+      handle: {},
+    },
+    release: vi.fn(),
+  });
+
+  const makeWebContentsStub = (id: string): Electron.WebContents => {
+    const stub: unknown = Object.assign(new EventEmitter(), { id, isDestroyed: () => false });
+    return stub as Electron.WebContents;
+  };
+
+  const makeBridge = (): TextureBridgeImpl =>
+    new TextureBridgeImpl(new BrowserWindow(), new TextureSender("t", 16, 9), null, baseOpts);
+
+  // forwardSharedTexture は async — 解決 → .then → emit まで複数 tick かかるので
+  // マクロタスク境界まで待ってから assert する。
+  const flush = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
+
+  it("emits forwardStatus { ok: true } once when forwarding starts, not per frame", async () => {
+    sendMock.mockReturnValue(undefined);
+    const bridge = makeBridge();
+    const statuses: ForwardStatusEvent[] = [];
+    bridge.on("forwardStatus", (s) => {
+      statuses.push(s);
+    });
+    bridge.forwardFrames(makeWebContentsStub("a"), { extraArgs: ["P1"] });
+
+    bridge.handlePaint({ texture: makeTexture() });
+    bridge.handlePaint({ texture: makeTexture() });
+    await flush();
+
+    expect(statuses).toEqual([{ ok: true, extraArgs: ["P1"] }]);
+  });
+
+  it("emits ok:false with the defect reason and dedupes consecutive identical failures", async () => {
+    sendMock.mockReturnValue(undefined);
+    // 永続 mockResolvedValue は afterEach の mockClear では消えず後続テストへ漏れるので
+    // フレーム数ぶんの Once を積む。
+    forwardSharedTextureMock
+      .mockResolvedValueOnce({ reason: "target-destroyed" })
+      .mockResolvedValueOnce({ reason: "target-destroyed" })
+      .mockResolvedValueOnce({ reason: "target-destroyed" });
+    const bridge = makeBridge();
+    const statuses: ForwardStatusEvent[] = [];
+    bridge.on("forwardStatus", (s) => {
+      statuses.push(s);
+    });
+    bridge.forwardFrames(makeWebContentsStub("a"));
+
+    bridge.handlePaint({ texture: makeTexture() });
+    bridge.handlePaint({ texture: makeTexture() });
+    bridge.handlePaint({ texture: makeTexture() });
+    await flush();
+
+    expect(statuses).toEqual([{ ok: false, reason: "target-destroyed", extraArgs: [] }]);
+  });
+
+  it("emits ok:true again when forwarding recovers", async () => {
+    sendMock.mockReturnValue(undefined);
+    forwardSharedTextureMock.mockResolvedValueOnce({ reason: "target-destroyed" });
+    const bridge = makeBridge();
+    const statuses: ForwardStatusEvent[] = [];
+    bridge.on("forwardStatus", (s) => {
+      statuses.push(s);
+    });
+    bridge.forwardFrames(makeWebContentsStub("a"));
+
+    bridge.handlePaint({ texture: makeTexture() });
+    await flush();
+    bridge.handlePaint({ texture: makeTexture() });
+    await flush();
+
+    expect(statuses.map((s) => s.ok)).toEqual([false, true]);
+  });
+
+  it("emits again when the failure reason changes", async () => {
+    sendMock.mockReturnValue(undefined);
+    const cause = new Error("boom");
+    forwardSharedTextureMock.mockResolvedValueOnce({ reason: "import-failed", cause });
+    forwardSharedTextureMock.mockResolvedValueOnce({ reason: "send-failed", cause });
+    const bridge = makeBridge();
+    const statuses: ForwardStatusEvent[] = [];
+    bridge.on("forwardStatus", (s) => {
+      statuses.push(s);
+    });
+    bridge.forwardFrames(makeWebContentsStub("a"));
+
+    bridge.handlePaint({ texture: makeTexture() });
+    await flush();
+    bridge.handlePaint({ texture: makeTexture() });
+    await flush();
+
+    expect(statuses).toEqual([
+      { ok: false, reason: "import-failed", cause, extraArgs: [] },
+      { ok: false, reason: "send-failed", cause, extraArgs: [] },
+    ]);
+  });
+
+  it("treats a rejected forward as a send-failed status", async () => {
+    sendMock.mockReturnValue(undefined);
+    const cause = new Error("rejected");
+    forwardSharedTextureMock.mockRejectedValueOnce(cause);
+    const bridge = makeBridge();
+    const statuses: ForwardStatusEvent[] = [];
+    bridge.on("forwardStatus", (s) => {
+      statuses.push(s);
+    });
+    bridge.forwardFrames(makeWebContentsStub("a"));
+
+    bridge.handlePaint({ texture: makeTexture() });
+    await flush();
+
+    expect(statuses).toEqual([{ ok: false, reason: "send-failed", cause, extraArgs: [] }]);
+  });
+
+  it("invokes the per-forward onStatus callback with the same transitions", async () => {
+    sendMock.mockReturnValue(undefined);
+    forwardSharedTextureMock.mockResolvedValueOnce({ reason: "target-destroyed" });
+    const bridge = makeBridge();
+    const seen: ForwardStatus[] = [];
+    bridge.forwardFrames(makeWebContentsStub("a"), {
+      extraArgs: ["P1"],
+      onStatus: (s) => {
+        seen.push(s);
+      },
+    });
+
+    bridge.handlePaint({ texture: makeTexture() });
+    await flush();
+    bridge.handlePaint({ texture: makeTexture() });
+    await flush();
+
+    expect(seen).toEqual([{ ok: false, reason: "target-destroyed" }, { ok: true }]);
+  });
+
+  it("keeps forwarding when an onStatus callback throws", async () => {
+    sendMock.mockReturnValue(undefined);
+    const bridge = makeBridge();
+    bridge.forwardFrames(makeWebContentsStub("a"), {
+      onStatus: () => {
+        throw new Error("listener blew up");
+      },
+    });
+
+    bridge.handlePaint({ texture: makeTexture() });
+    await flush();
+    bridge.handlePaint({ texture: makeTexture() });
+    await flush();
+
+    // 例外は unhandled rejection にならず、後続フレームの転送も止まらない。
+    expect(forwardSharedTextureMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not emit for a forward disposed while a frame was in flight", async () => {
+    sendMock.mockReturnValue(undefined);
+    let settle: (value: undefined) => void = () => {};
+    forwardSharedTextureMock.mockImplementationOnce(
+      async () =>
+        await new Promise<undefined>((resolve) => {
+          settle = resolve;
+        }),
+    );
+    const bridge = makeBridge();
+    const statuses: ForwardStatusEvent[] = [];
+    bridge.on("forwardStatus", (s) => {
+      statuses.push(s);
+    });
+    const forward = bridge.forwardFrames(makeWebContentsStub("a"));
+
+    bridge.handlePaint({ texture: makeTexture() });
+    forward.dispose();
+    settle(undefined);
+    await flush();
+
+    expect(statuses).toEqual([]);
+  });
+
+  it("exposes active: true while registered and false once disposed", () => {
+    sendMock.mockReturnValue(undefined);
+    const bridge = makeBridge();
+    const forward = bridge.forwardFrames(makeWebContentsStub("a"));
+
+    expect(forward.active).toBe(true);
+
+    forward.dispose();
+
+    expect(forward.active).toBe(false);
+  });
+
+  it("flips active to false when the target is destroyed or the bridge is disposed", () => {
+    sendMock.mockReturnValue(undefined);
+    const bridge = makeBridge();
+    const wc = makeWebContentsStub("a");
+    const byTarget = bridge.forwardFrames(wc);
+    const byBridge = bridge.forwardFrames(makeWebContentsStub("b"));
+
+    wc.emit("destroyed");
+    expect(byTarget.active).toBe(false);
+    expect(byBridge.active).toBe(true);
+
+    bridge.dispose();
+    expect(byBridge.active).toBe(false);
+  });
+
+  it("reports active: false for a registration that was silently refused", () => {
+    sendMock.mockReturnValue(undefined);
+    const bridge = makeBridge();
+    const dead = makeWebContentsStub("a");
+    Object.assign(dead, { isDestroyed: () => true });
+
+    // 破壊済み target と dispose 済み bridge — どちらも 0.14 では inert handle を
+    // 無言で返していた。呼び出し側が登録の失敗を検知できることが肝。
+    expect(bridge.forwardFrames(dead).active).toBe(false);
+
+    bridge.dispose();
+
+    expect(bridge.forwardFrames(makeWebContentsStub("b")).active).toBe(false);
   });
 });

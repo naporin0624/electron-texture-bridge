@@ -10,6 +10,8 @@ export type {
   TextureBridge,
   FrameForwardOptions,
   FrameForward,
+  ForwardStatus,
+  ForwardStatusEvent,
 } from "./types";
 export type {
   TextureReceiverBridgeOptions,

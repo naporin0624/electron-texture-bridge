@@ -78,7 +78,7 @@ Three properties of that handler are load-bearing, and adding forwarding is exac
 |---------|---------|
 | `bridge.forwardFrames(wc, { sourceId })` / `{ channel }` / `{ maxFps }` | Only `{ extraArgs: [...] }` exists. Rate control belongs to the receiver's rAF coalescing. |
 | `forward.stop()` / `subscription.unsubscribe()` | `forward.dispose()`. |
-| Expecting forward failures on `bridge.on("error")` | Best-effort: defects are discarded by the driver. Use `forwardSharedTexture`'s returned defect if you need visibility. |
+| Expecting forward failures on `bridge.on("error")` | Wrong channel. `bridge.on("forwardStatus")` (or `forwardFrames`'s `onStatus`) reports them as deduped state changes; with the primitive, read the resolved `ForwardDefect` yourself. |
 | Preview window with default `webPreferences` | Shared-texture consumption needs the receiver preload setup — see receiving-shared-textures skill. |
 | Calling `frame.videoFrame.close()` on the frame passed to `onFrame` | The consumer pool closes the original after your handler settles. `clone()` if you hold it; close only clones. |
 | Keeping a `capturePage` fallback "just in case" | Delete it once verified — a hidden 30fps readback timer defeats the migration. |
