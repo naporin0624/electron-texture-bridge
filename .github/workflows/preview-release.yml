@@ -22,13 +22,15 @@ jobs:
     runs-on: ubuntu-latest
     name: pkg.pr.new
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         with:
           version: 9
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           cache: pnpm
@@ -45,4 +47,8 @@ jobs:
       # the preview installs that dependency from npm like a normal release.
       # `npm pack` would leave the protocol literal and the tarball would be
       # uninstallable outside this workspace.
-      - run: pnpm dlx pkg-pr-new@0 publish --pnpm './packages/renderer'
+      #
+      # zizmor reads "publish" and asks for trusted publishing. There is no
+      # registry credential to replace here: pkg.pr.new authorizes the run
+      # through its GitHub App, and nothing is sent to npm.
+      - run: pnpm dlx pkg-pr-new@0 publish --pnpm './packages/renderer' # zizmor: ignore[use-trusted-publishing]
