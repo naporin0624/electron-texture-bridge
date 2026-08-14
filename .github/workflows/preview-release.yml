@@ -1,0 +1,48 @@
+name: Preview Release
+
+# Publishes an installable preview of the renderer package for every pull
+# request, so a consumer app can run against a change before it is merged and
+# released. Nothing reaches the npm registry and no version is bumped —
+# pkg.pr.new serves the tarball from its own host, keyed by commit SHA.
+#
+# Requires the pkg.pr.new GitHub App to be installed on this repository
+# (https://github.com/apps/pkg-pr-new). Without it the publish step fails with
+# an explicit message; it cannot be granted from inside the workflow.
+
+on:
+  pull_request:
+    branches: [main]
+
+# The preview URL and the PR comment come from the GitHub App, not from this
+# workflow's token — it needs nothing.
+permissions: {}
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    name: pkg.pr.new
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install
+
+      # core is built because renderer's build reads its types; only renderer
+      # is published. The native addon is deliberately left out: it needs the
+      # Rust matrix, and a preview of a renderer-only change does not move it.
+      - run: pnpm build:core && pnpm build:renderer
+
+      # --pnpm packs through `pnpm pack`, which rewrites the `workspace:*`
+      # dependency on @napolab/texture-bridge-core to its concrete version, so
+      # the preview installs that dependency from npm like a normal release.
+      # `npm pack` would leave the protocol literal and the tarball would be
+      # uninstallable outside this workspace.
+      - run: pnpm dlx pkg-pr-new@0 publish --pnpm './packages/renderer'
