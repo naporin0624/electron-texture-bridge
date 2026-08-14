@@ -55,6 +55,7 @@ npx skills add naporin0624/electron-texture-bridge@receiving-shared-textures
 npx skills add naporin0624/electron-texture-bridge@managing-frame-forward-lifecycle
 npx skills add naporin0624/electron-texture-bridge@delivering-imported-textures
 npx skills add naporin0624/electron-texture-bridge@handling-texture-bridge-failures
+npx skills add naporin0624/electron-texture-bridge@diagnosing-dead-frame-forwards
 ```
 
 Add `-g` to install globally instead of into the current project.
@@ -74,6 +75,7 @@ Skills activate automatically from conversation context — there are no command
 | `managing-frame-forward-lifecycle` | Registering and tearing down `forwardFrames` targets: monitor windows that close and reopen, repeated connect/disconnect, `MaxListenersExceededWarning`, leaks around forwarding |
 | `delivering-imported-textures` | Delivering a texture to a renderer from main: `importSharedTexture` / `sendSharedTexture` / `release()` by hand, where `release()` belongs, `sendImportedTexture` vs `forwardSharedTexture` |
 | `handling-texture-bridge-failures` | Error handling and telemetry: which calls throw, reject, model a defect, or emit — what to wrap with `Result.fromThrowable`, silently black output, a main-process crash from a bridge call |
+| `diagnosing-dead-frame-forwards` | A forwarded preview/monitor that went black, froze on its last frame, or shows "no signal" — dead previews with nothing in the logs, or only some targets dying while Syphon/Spout keeps working |
 
 ## Quick Start
 

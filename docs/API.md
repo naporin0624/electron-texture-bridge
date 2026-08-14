@@ -64,6 +64,7 @@ interface TextureBridge {
   on(event: "ready", listener: () => void): this;
   on(event: "error", listener: (error: Error) => void): this;
   on(event: "frameDropped", listener: (defect: PaintDefect) => void): this;
+  on(event: "forwardStatus", listener: (status: ForwardStatusEvent) => void): this;
   on(event: "resize", listener: (width: number, height: number) => void): this;
   on(event: "disposed", listener: () => void): this;
 
@@ -88,6 +89,27 @@ again only after a successful send or a reason change. If a drop latches
 before your listener is attached (e.g. while the renderer page is still
 loading), read `bridge.droppedReason` — it holds the latest drop reason, or
 `null` after a successful send.
+
+`forwardStatus` reports the delivery state of each `forwardFrames`
+registration — the only channel that does, since forwarding never raises
+`"error"` and never touches `frameDropped` / `droppedReason`. It fires on
+state *changes*, not per frame: the first successful frame, the first
+failure, a change of failure reason, and the recovery back to success.
+
+```typescript
+type ForwardStatus =
+  | { ok: true }
+  | { ok: false; reason: "target-destroyed" | "import-failed" | "send-failed"; cause?: Error };
+
+type ForwardStatusEvent = ForwardStatus & { extraArgs: readonly unknown[] };
+```
+
+Which registration a status belongs to is identified by `extraArgs` — the tag
+passed to `forwardFrames(target, { extraArgs })`. To scope the same
+transitions to one registration instead, pass `onStatus` in the same options
+object. Watch this: a forward can die while paint, sender and preview all stay
+healthy, and without it the only symptom is a monitor window that quietly
+stays black.
 
 `dispose()` destroys the offscreen `renderWindow` synchronously via
 `destroy()` (not `close()`), so teardown cannot lose the race against
@@ -115,14 +137,18 @@ call it **before** `dispose()`, not after.
 ### `TextureBridge.forwardFrames(target, options?)`
 
 ```typescript
-const forward = bridge.forwardFrames(monitorWindow.webContents, { extraArgs: [slot] });
+const forward = bridge.forwardFrames(monitorWindow.webContents, {
+  extraArgs: [slot],
+  onStatus: (s) => log(`slot ${slot} forwarding`, s.ok ? "ok" : s.reason),
+});
+if (!forward.active) log(`slot ${slot} was refused — no frames will arrive`);
 // later
 forward.dispose(); // idempotent
 ```
 
 Registers a `WebContents` (e.g. a monitor/multiviewer window) to receive every subsequent paint frame over the same zero-copy shared-texture path `forwardSharedTexture` uses — no pixel readback, just a GPU handle.
 
-**Best-effort contract**, same as the preview path: forward failures (a `ForwardDefect` from the core `forwardSharedTexture` primitive) are discarded by this driver and never surface as an `"error"` event or affect `frameDropped`/`droppedReason`. **Independent of the native Syphon/Spout send** — forwarding runs before `sendTextureFromPaintEvent` inside the paint handler, so a thrown native send failure can't suppress a registered forward, and a forward failure can never block the native send either; the two paths fire regardless of each other's outcome.
+**Best-effort contract**, same as the preview path: forward failures (a `ForwardDefect` from the core `forwardSharedTexture` primitive) never stop the stream, never surface as an `"error"` event, and never affect `frameDropped`/`droppedReason` — they are reported as state transitions on `forwardStatus` (bridge-wide) and `options.onStatus` (this registration only). `FrameForward.active` covers the other half: it is `false` when the registration was refused outright (bridge disposed, or target already destroyed) and flips to `false` when the target is destroyed or the forward is disposed. **Independent of the native Syphon/Spout send** — forwarding runs before `sendTextureFromPaintEvent` inside the paint handler, so a thrown native send failure can't suppress a registered forward, and a forward failure can never block the native send either; the two paths fire regardless of each other's outcome.
 
 `FrameForward.dispose()` unregisters that one target and is idempotent — calling it twice, or after `bridge.dispose()` already cleared it, is a no-op. `bridge.dispose()` clears every registered forward.
 

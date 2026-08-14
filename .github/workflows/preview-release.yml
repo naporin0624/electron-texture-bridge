@@ -1,0 +1,54 @@
+name: Preview Release
+
+# Publishes an installable preview of the renderer package for every pull
+# request, so a consumer app can run against a change before it is merged and
+# released. Nothing reaches the npm registry and no version is bumped —
+# pkg.pr.new serves the tarball from its own host, keyed by commit SHA.
+#
+# Requires the pkg.pr.new GitHub App to be installed on this repository
+# (https://github.com/apps/pkg-pr-new). Without it the publish step fails with
+# an explicit message; it cannot be granted from inside the workflow.
+
+on:
+  pull_request:
+    branches: [main]
+
+# The preview URL and the PR comment come from the GitHub App, not from this
+# workflow's token — it needs nothing.
+permissions: {}
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    name: pkg.pr.new
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install
+
+      # core is built because renderer's build reads its types; only renderer
+      # is published. The native addon is deliberately left out: it needs the
+      # Rust matrix, and a preview of a renderer-only change does not move it.
+      - run: pnpm build:core && pnpm build:renderer
+
+      # --pnpm packs through `pnpm pack`, which rewrites the `workspace:*`
+      # dependency on @napolab/texture-bridge-core to its concrete version, so
+      # the preview installs that dependency from npm like a normal release.
+      # `npm pack` would leave the protocol literal and the tarball would be
+      # uninstallable outside this workspace.
+      #
+      # zizmor reads "publish" and asks for trusted publishing. There is no
+      # registry credential to replace here: pkg.pr.new authorizes the run
+      # through its GitHub App, and nothing is sent to npm.
+      - run: pnpm dlx pkg-pr-new@0 publish --pnpm './packages/renderer' # zizmor: ignore[use-trusted-publishing]

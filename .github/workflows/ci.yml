@@ -6,18 +6,42 @@ on:
   pull_request:
     branches: [main]
 
+# Read-only: these jobs build and test, they never write back.
+permissions:
+  contents: read
+
 jobs:
+  # Keeps the workflows themselves under review — unpinned actions, the token
+  # left behind in .git/config, permissions wider than a job needs. The tree is
+  # clean as of this job's introduction, so anything it reports later is
+  # something that pull request introduced, not inherited debt.
+  workflows:
+    runs-on: ubuntu-latest
+    name: Workflow Audit
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+
+      # Pinned: an audit that silently changes its own ruleset turns a green
+      # check into a moving target.
+      - run: uvx zizmor@1.29.0 --persona=regular .github/workflows/
+
   check:
     runs-on: ubuntu-latest
     name: Lint & Typecheck
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         with:
           version: 9
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           cache: pnpm

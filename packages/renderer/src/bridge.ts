@@ -6,12 +6,14 @@ import {
   type PaintTexture,
   type PaintDefect,
 } from "@napolab/texture-bridge-core";
-import { forwardSharedTexture } from "@napolab/texture-bridge-core/electron";
+import { forwardSharedTexture, type ForwardDefect } from "@napolab/texture-bridge-core/electron";
 import { PreviewManager } from "./preview-manager";
 import { FpsCounter } from "./fps-counter";
 import type {
   TextureBridgeOptions,
   TextureBridge,
+  ForwardStatus,
+  ForwardStatusEvent,
   FrameForward,
   FrameForwardOptions,
 } from "./types";
@@ -91,6 +93,49 @@ interface PaintEvent extends Event {
 }
 
 /**
+ * One `forwardFrames` registration. `lastStatus` is the only mutable field —
+ * it is the dedupe cursor that turns a per-frame result stream into the
+ * state-change stream `forwardStatus` / `onStatus` promise to deliver.
+ */
+interface ForwardEntry {
+  readonly target: WebContents;
+  readonly extraArgs: readonly unknown[];
+  readonly onStatus?: (status: ForwardStatus) => void;
+  readonly onDestroyed: () => void;
+  /** Last reported state, or `null` before the first frame settles. */
+  lastStatus: "ok" | ForwardDefect["reason"] | null;
+}
+
+/**
+ * Widen one frame's outcome into the public state shape. Module scope and
+ * pure so the branch that decides whether a `cause` exists is testable and
+ * lives in exactly one place — `target-destroyed` is the only defect without
+ * one, so it cannot be spread in blindly.
+ */
+const toForwardStatus = (defect: ForwardDefect | undefined): ForwardStatus => {
+  if (defect === undefined) return { ok: true };
+  if (defect.reason === "target-destroyed") return { ok: false, reason: defect.reason };
+  return { ok: false, reason: defect.reason, cause: defect.cause };
+};
+
+/**
+ * Hand a status to one best-effort observer, swallowing whatever it throws.
+ * Both sinks (`onStatus` and the `forwardStatus` event) run inside a promise
+ * continuation, where an escaping throw becomes an unhandled rejection in the
+ * main process — and neither sink is allowed to break frame forwarding. The
+ * `"error"` event is deliberately not used to report this: it throws when
+ * nobody is listening, which is exactly the situation a diagnostic channel
+ * has to survive.
+ */
+const notifyForwardObserver = (deliver: () => void, label: string): void => {
+  try {
+    deliver();
+  } catch (err) {
+    console.error(`[texture-bridge] ${label} threw:`, err);
+  }
+};
+
+/**
  * Remove a `forwardFrames` entry's "destroyed" listener from its target.
  * Module scope so the dependency (the entry) is an explicit argument — no
  * inner function declarations. Guarded with `isDestroyed()` because
@@ -134,11 +179,7 @@ export class TextureBridgeImpl extends EventEmitter implements TextureBridge {
   private options: TextureBridgeOptions;
   private readonly policy: OsrScalePolicy;
   private readonly createSender: TextureBridgeDeps["createSender"];
-  private readonly forwardEntries = new Set<{
-    readonly target: WebContents;
-    readonly extraArgs: readonly unknown[];
-    readonly onDestroyed: () => void;
-  }>();
+  private readonly forwardEntries = new Set<ForwardEntry>();
 
   constructor(
     renderWindow: BrowserWindow,
@@ -181,6 +222,28 @@ export class TextureBridgeImpl extends EventEmitter implements TextureBridge {
     this.emit("frameDropped", defect);
   }
 
+  /**
+   * Record one frame's forward outcome for `entry` and announce it only when
+   * it differs from the last announced one — the first success, the first
+   * failure, a change of failure reason, and the recovery back to success.
+   * At 30fps a stuck target would otherwise emit 30 identical events a
+   * second (same dedupe stance as `frameDropped`).
+   */
+  private settleForward(entry: ForwardEntry, defect: ForwardDefect | undefined): void {
+    // A result that lands after the registration was disposed (or pruned by
+    // the target's "destroyed" event) describes a forward nobody owns
+    // anymore — reporting it would resurrect a dead handle in the log.
+    if (!this.forwardEntries.has(entry)) return;
+    const next = defect?.reason ?? "ok";
+    if (next === entry.lastStatus) return;
+    entry.lastStatus = next;
+
+    const status = toForwardStatus(defect);
+    notifyForwardObserver(() => entry.onStatus?.(status), "forwardFrames onStatus");
+    const event: ForwardStatusEvent = { ...status, extraArgs: entry.extraArgs };
+    notifyForwardObserver(() => this.emit("forwardStatus", event), "forwardStatus listener");
+  }
+
   /** Handle a paint event from the offscreen BrowserWindow. */
   handlePaint(event: { texture?: PaintTexture }): void {
     const texture = event.texture;
@@ -201,7 +264,9 @@ export class TextureBridgeImpl extends EventEmitter implements TextureBridge {
 
     try {
       // Best-effort monitors: the primitive reports defects, this driver
-      // discards them by contract (same stance as the preview path).
+      // turns them into `forwardStatus` transitions instead of dropping them
+      // — a silently dead forward is indistinguishable from a healthy one at
+      // every other layer (paint, sender and preview all keep working).
       // Independent of the native Syphon/Spout send — this runs before
       // sendTextureFromPaintEvent so a native send throw cannot suppress a
       // monitor forward. Each call must START synchronously — the paint
@@ -210,10 +275,16 @@ export class TextureBridgeImpl extends EventEmitter implements TextureBridge {
       for (const entry of this.forwardEntries) {
         // The primitive cannot reject today, but the best-effort contract
         // must not depend on another package's discipline — an unhandled
-        // rejection would surface in the main process.
-        void forwardSharedTexture(texture.textureInfo, entry.target, entry.extraArgs).catch(
-          () => {},
-        );
+        // rejection would surface in the main process. A rejection is
+        // reported as `send-failed`: it can only escape from the send half,
+        // the import half is already wrapped in a Result by the primitive.
+        void forwardSharedTexture(texture.textureInfo, entry.target, entry.extraArgs)
+          .then((defect) => {
+            this.settleForward(entry, defect);
+          })
+          .catch((err: unknown) => {
+            this.settleForward(entry, { reason: "send-failed", cause: toError(err) });
+          });
       }
 
       const defect = sendTextureFromPaintEvent(this.sender, texture.textureInfo);
@@ -260,17 +331,22 @@ export class TextureBridgeImpl extends EventEmitter implements TextureBridge {
     // from the other direction: `once("destroyed", ...)` below would never
     // fire for a target that's already dead, so the entry would never
     // self-prune either — reject it up front instead.
-    if (this._disposed || target.isDestroyed()) return { dispose: () => {} };
+    // `active: false` is the only trace a refused registration leaves —
+    // without it the caller wires up a forward, gets a handle, and waits
+    // forever for frames that were never going to come.
+    if (this._disposed || target.isDestroyed()) return { dispose: () => {}, active: false };
 
     // `entry` closes over itself via `onDestroyed` — safe despite the
     // apparent forward reference: the closure only runs once `target`
     // fires "destroyed", by which point `entry` has long been assigned.
-    const entry = {
+    const entry: ForwardEntry = {
       target,
       extraArgs: options?.extraArgs ?? [],
+      onStatus: options?.onStatus,
       onDestroyed: (): void => {
         this.forwardEntries.delete(entry);
       },
+      lastStatus: null,
     };
     this.forwardEntries.add(entry);
 
@@ -281,6 +357,13 @@ export class TextureBridgeImpl extends EventEmitter implements TextureBridge {
     // forwardSharedTexture against an already-destroyed target.
     target.once("destroyed", entry.onDestroyed);
 
+    // Membership in the set IS the liveness of this registration — reading
+    // it through a getter keeps `active` honest for the two teardowns the
+    // caller never initiates: the target being destroyed, and the bridge
+    // being disposed. Captured as a local because an object-literal getter
+    // does not inherit the enclosing `this`.
+    const entries = this.forwardEntries;
+
     return {
       dispose: () => {
         this.forwardEntries.delete(entry);
@@ -289,6 +372,9 @@ export class TextureBridgeImpl extends EventEmitter implements TextureBridge {
         // connect/disconnect cycles — without unhooking here, each cycle
         // leaves a dangling "destroyed" listener on that target.
         unhookDestroyedListener(entry);
+      },
+      get active(): boolean {
+        return entries.has(entry);
       },
     };
   }
