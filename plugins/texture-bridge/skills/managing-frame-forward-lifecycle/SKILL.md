@@ -84,3 +84,5 @@ Which bridge calls throw, reject, or model their failures instead: see the handl
 | Keeping decks "connected" across a window close and expecting frames after reopen | The old entry self-pruned. New window = new `WebContents` = new `forwardFrames` call. |
 | Expecting forward failures on `bridge.on("error")` / `frameDropped` | Wrong channel — forwarding reports on `"forwardStatus"` / `options.onStatus`. |
 | Registering forwards and subscribing to nothing | The one failure mode with no other symptom: paint, sender and preview stay healthy while the monitor goes black. One `forwardStatus` listener is the whole fix. |
+
+**Already black?** Diagnosing a forward that has *already* gone dead is a different job from wiring the handling: use `diagnosing-dead-frame-forwards`.

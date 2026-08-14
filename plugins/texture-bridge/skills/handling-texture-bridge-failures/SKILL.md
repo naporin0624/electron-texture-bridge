@@ -91,3 +91,5 @@ win.webContents.on("paint", (e) => {          // stays sync
 | Assuming the bridge's `"frameDropped"` / `"error"` covers forwarding | Forwarding has its own channel: `"forwardStatus"` / `options.onStatus`. Neither of the other two ever fires for it. |
 | Subscribing to nothing and calling forwarding "best-effort" | Best-effort means *the stream survives failures*, not *failures are invisible*. An unwatched forward that dies looks identical to a healthy one at every other layer — paint, sender, preview and `droppedReason` all stay green while the monitor sits black. |
 | Treating `forwardFrames()` as proof the wiring is live | A refused registration returns a handle too. `if (!forward.active)` right after the call is the one-line check that catches it. |
+
+**Already black?** Diagnosing a forward that has *already* gone dead is a different job from wiring the handling: use `diagnosing-dead-frame-forwards`.
