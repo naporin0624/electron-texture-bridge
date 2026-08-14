@@ -1,6 +1,6 @@
 {
   "name": "@napolab/texture-bridge-core",
-  "version": "0.14.0",
+  "version": "0.15.0",
   "description": "Low-level GPU texture sharing primitives for Electron (Spout + Syphon Metal): TextureSender/TextureReceiver + paint-event helpers",
   "main": "./dist/index.cjs",
   "module": "./dist/index.mjs",

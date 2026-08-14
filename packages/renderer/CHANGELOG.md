@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.15.0](https://github.com/naporin0624/electron-texture-bridge/compare/renderer-v0.14.0...renderer-v0.15.0) (2026-08-14)
+
+
+### Features
+
+* **renderer:** report forwardFrames delivery state via forwardStatus ([89b37e2](https://github.com/naporin0624/electron-texture-bridge/commit/89b37e2fbf08edd05b7ca7096e813b7b737d2fad))
+* **renderer:** report forwardFrames delivery state via forwardStatus ([4236e8d](https://github.com/naporin0624/electron-texture-bridge/commit/4236e8df396dfe449f8dc946a1cf80c3ddcfd3cd))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @napolab/texture-bridge-core bumped to 0.15.0
+
 ## [0.14.0](https://github.com/naporin0624/electron-texture-bridge/compare/renderer-v0.13.1...renderer-v0.14.0) (2026-08-13)
 
 
