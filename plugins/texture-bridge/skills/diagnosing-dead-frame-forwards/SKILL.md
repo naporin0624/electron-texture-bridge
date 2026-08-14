@@ -28,6 +28,12 @@ if (!forward.active) log(`forward ${slot} REFUSED — no frames will ever arrive
 
 `forwardStatus` is deduped to transitions, so a plain log of every event is already the outage report: `{ ok: false }` with no `{ ok: true }` after it means that target has been dark since that timestamp.
 
+### If the installed version predates these signals
+
+Check the consumer's installed types, not the source you have checked out: if `FrameForwardOptions` has no `onStatus` (or `FrameForward` has no `active`), the app is pinned to a version that reports nothing. **Upgrade — that IS the fix**, not a prerequisite for one: on the old version this failure mode is undiagnosable by construction, and every substitute costs a repro cycle and hides the race (see below).
+
+If the upgrade cannot land immediately, the surviving seams are coarse and none of them observe forwarding itself: `bridge.on("frameDropped")` / `bridge.on("error")` per source, and your own logging around every place *you* call `forwardFrames()` and `dispose()`. Absence of events there tells you almost nothing — which is exactly why the signals were added.
+
 ## Reading the result
 
 | `active` | Status history | What it means | Where to look next |
@@ -69,6 +75,8 @@ The failure is timing-sensitive. In a real investigation, adding logging around 
 | Ranking hypotheses (backpressure, leaks, GPU pressure) before reading `active` + `forwardStatus` | Both signals already exist and are free. Guessing costs a repro cycle each |
 | Patching `handlePaint` to count in-flight promises | You are rebuilding, less accurately, the reporting the driver already does |
 | Subscribing to nothing and calling forwarding "best-effort" | Best-effort means the *stream* survives failures, not that failures are invisible |
+| Building a substitute for `forwardStatus` because the pinned version lacks it | The upgrade is smaller than the substitute, and the substitute cannot see the forward path at all |
+| Reading the checked-out library source instead of the consumer's installed `node_modules` types | The repo you are reading and the version the app runs can differ by exactly the feature you are about to rely on |
 
 ## Related skills
 
