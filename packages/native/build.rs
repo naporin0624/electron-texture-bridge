@@ -56,6 +56,9 @@ fn build_windows(vendor_dir: &std::path::Path) {
     println!("cargo:rustc-link-lib=comdlg32");
     println!("cargo:rustc-link-lib=comctl32");
     println!("cargo:rustc-link-lib=shlwapi");
+    // timeBeginPeriod/timeEndPeriod for the push worker's 1 ms idle wait.
+    // SpoutFrameCount.h also requests it via #pragma comment; be explicit.
+    println!("cargo:rustc-link-lib=winmm");
 }
 
 #[cfg(target_os = "macos")]

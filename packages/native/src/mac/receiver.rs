@@ -1,8 +1,37 @@
 use super::ffi;
 use std::ffi::CString;
 
+/// Push-path frame sink. Invoked on a Metal completion thread; the
+/// `SharedIoSurfaceInfo` carries one CFRetain the sink now owns.
+pub type FrameCallback = Box<dyn Fn(SharedIoSurfaceInfo) + Send + Sync>;
+
 pub struct Receiver {
     handle: Option<ffi::SyphonReceiverHandle>,
+    /// Boxed twice so the C side gets a thin pointer. Freed only after the C
+    /// side has been told to stop calling it (unsubscribe or destroy).
+    frame_callback: Option<Box<FrameCallback>>,
+}
+
+/// `extern "C"` trampoline handed to `syphon_receiver_set_frame_callback`.
+/// `ctx` is the `*const FrameCallback` owned by `Receiver::frame_callback`.
+unsafe extern "C" fn frame_callback_trampoline(
+    ctx: *mut std::ffi::c_void,
+    iosurface: *mut std::ffi::c_void,
+    width: u32,
+    height: u32,
+    pixel_format_code: u32,
+) {
+    let info = SharedIoSurfaceInfo {
+        iosurface_ptr: iosurface as u64,
+        width,
+        height,
+        pixel_format_code,
+    };
+    let callback = unsafe { &*(ctx as *const FrameCallback) };
+    // Never unwind across the FFI boundary. A panicking sink may already have
+    // passed the surface on, so leaking its retain is the safe choice over a
+    // possible double CFRelease.
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback(info)));
 }
 
 /// Metadata + raw IOSurfaceRef pointer for a Syphon frame received as a shared
@@ -104,15 +133,44 @@ impl Receiver {
 
         Ok(Self {
             handle: Some(handle),
+            frame_callback: None,
         })
     }
 
     pub fn destroy(&mut self) {
         if let Some(h) = self.handle.take() {
+            // Destroy flips the bridge into shutdown under its callback mutex
+            // and waits for in-flight staging, so once it returns no
+            // trampoline call can be running or start — only then is it safe
+            // to free the boxed callback.
             unsafe {
                 ffi::syphon_receiver_destroy(h);
             }
         }
+        self.frame_callback = None;
+    }
+
+    /// Subscribe (`Some`) or unsubscribe (`None`) the push path. Replacing an
+    /// existing callback swaps it atomically on the C side before the old one
+    /// is freed. No-op after `destroy`.
+    pub fn set_frame_callback(&mut self, callback: Option<FrameCallback>) {
+        let Some(h) = self.handle else {
+            return;
+        };
+        let next = callback.map(Box::new);
+        match &next {
+            Some(boxed) => unsafe {
+                let ctx = &**boxed as *const FrameCallback as *mut std::ffi::c_void;
+                ffi::syphon_receiver_set_frame_callback(h, Some(frame_callback_trampoline), ctx);
+            },
+            None => unsafe {
+                ffi::syphon_receiver_set_frame_callback(h, None, std::ptr::null_mut());
+            },
+        }
+        // The C setter takes the same mutex the completion handler holds while
+        // invoking the callback, so the previous callback is no longer running
+        // and can be dropped here.
+        self.frame_callback = next;
     }
 
     pub fn has_new_frame(&self) -> bool {
@@ -367,6 +425,35 @@ mod tests {
         // wired through yet.
         let result = decode_iosurface_return(99, 0, 0, 0, 0);
         assert!(result.expect("unknown code must not error").is_none());
+    }
+
+    // ---- syphon_ring_pick_slot: pure slot picker for the push staging ring.
+    // A slot is free when only the bridge holds it (normalized retain count
+    // == 1) and no staging command buffer is writing it.
+
+    fn pick_slot(counts: &[u32], busy: &[u8]) -> i32 {
+        assert_eq!(counts.len(), busy.len());
+        unsafe { ffi::syphon_ring_pick_slot(counts.as_ptr(), busy.as_ptr(), counts.len() as u32) }
+    }
+
+    #[test]
+    fn ring_pick_slot_returns_first_free_slot() {
+        assert_eq!(pick_slot(&[2, 1, 1], &[0, 0, 0]), 1);
+    }
+
+    #[test]
+    fn ring_pick_slot_skips_gpu_busy_slot() {
+        assert_eq!(pick_slot(&[1, 1, 1], &[1, 0, 0]), 1);
+    }
+
+    #[test]
+    fn ring_pick_slot_returns_minus_one_when_all_held() {
+        assert_eq!(pick_slot(&[2, 3, 2], &[0, 0, 0]), -1);
+    }
+
+    #[test]
+    fn ring_pick_slot_empty_ring() {
+        assert_eq!(pick_slot(&[], &[]), -1);
     }
 
     // ---- Pixel format utility tests ----

@@ -168,6 +168,27 @@ export declare class TextureReceiver {
    */
   stop(): void
   /**
+   * Subscribe to frames pushed as soon as they are staged on the GPU
+   * (macOS: Syphon; Windows: Spout), instead of polling
+   * `receiveSharedTexture`.
+   *
+   * The callback runs on the JS thread with a `SharedTextureFrame` whose
+   * `handle` follows the same ownership contract as `receiveSharedTexture`:
+   * pass it to `closeNativeHandle()` exactly once, also after
+   * `importSharedTexture` (Electron keeps its own reference). Frames are
+   * staged into a 3-slot ring; when no slot is free the frame is dropped
+   * natively. On macOS a slot counts as held while it is retained beyond
+   * the ring's own reference or `IOSurfaceIsInUse` reports it in use
+   * downstream; on Windows a slot is effectively free once the caller
+   * closes its handle, so the ring round-robins over its 3 slots. Passing `null` unsubscribes; calling again
+   * replaces the previous callback. After `stop()` returns no callback
+   * fires. While subscribed, the receiver keeps the event loop alive.
+   *
+   * Throws `"TextureReceiver has been stopped"` after `stop()`, and
+   * `"onSharedTexture is not supported on this platform"` elsewhere.
+   */
+  onSharedTexture(callback: ((frame: SharedTextureFrame) => void) | null): void
+  /**
    * Toggle whether `receiveSharedTexture` applies a vertical flip when
    * staging the frame for `importSharedTexture`. Defaults to `true`
    * (matches PR #46 behavior, suitable for `drawImage(VideoFrame)` /
