@@ -53,6 +53,14 @@ extern "C" {
         out_pixel_format: *mut u32,
     ) -> i32;
     pub fn syphon_receiver_set_flip_y(handle: SyphonReceiverHandle, flip: i32);
+    pub fn syphon_receiver_set_frame_callback(
+        handle: SyphonReceiverHandle,
+        cb: Option<SyphonFrameCallback>,
+        ctx: *mut std::ffi::c_void,
+    );
+    /// Pure ring-slot picker (used by the C++ push path + Rust tests).
+    #[allow(dead_code)]
+    pub fn syphon_ring_pick_slot(retain_counts: *const u32, gpu_busy: *const u8, n: u32) -> i32;
 
     // ---- Discovery ----
     pub fn syphon_discovery_list_servers() -> *mut c_char;
@@ -69,3 +77,13 @@ extern "C" {
 }
 
 pub type SyphonReceiverHandle = *mut std::ffi::c_void;
+
+/// Push-path frame callback. Invoked on a Metal completion thread with an
+/// IOSurfaceRef that carries exactly one CFRetain owned by the callee.
+pub type SyphonFrameCallback = unsafe extern "C" fn(
+    ctx: *mut std::ffi::c_void,
+    iosurface: *mut std::ffi::c_void,
+    width: u32,
+    height: u32,
+    pixel_format_code: u32,
+);

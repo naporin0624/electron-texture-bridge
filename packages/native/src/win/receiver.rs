@@ -1,11 +1,40 @@
 use super::ffi;
 use std::ffi::CString;
 
+/// Push-path frame sink. Invoked on the receiver's native push worker thread;
+/// the `SharedTextureHandleInfo` carries an NT HANDLE the sink now owns.
+pub type FrameCallback = Box<dyn Fn(SharedTextureHandleInfo) + Send + Sync>;
+
 pub struct Receiver {
     handle: Option<ffi::SpoutReceiverHandle>,
     buffer: Vec<u8>,
     #[allow(dead_code)]
     sender_name: String,
+    /// Boxed twice so the C side gets a thin pointer. Freed only after the C
+    /// side has joined the worker that calls it (unsubscribe or destroy).
+    frame_callback: Option<Box<FrameCallback>>,
+}
+
+/// `extern "C"` trampoline handed to `spout_receiver_set_frame_callback`.
+/// `ctx` is the `*const FrameCallback` owned by `Receiver::frame_callback`.
+unsafe extern "C" fn frame_callback_trampoline(
+    ctx: *mut std::ffi::c_void,
+    nt_handle: *mut std::ffi::c_void,
+    width: u32,
+    height: u32,
+    dxgi_format: u32,
+) {
+    let info = SharedTextureHandleInfo {
+        nt_handle: nt_handle as u64,
+        width,
+        height,
+        format: dxgi_format,
+    };
+    let callback = unsafe { &*(ctx as *const FrameCallback) };
+    // Never unwind across the FFI boundary. A panicking sink may already have
+    // passed the handle on, so leaking it is the safe choice over a possible
+    // double CloseHandle.
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback(info)));
 }
 
 /// Metadata + raw NT handle for a Spout frame received as a shared GPU texture.
@@ -36,6 +65,7 @@ impl Receiver {
             handle: Some(handle),
             buffer: Vec::new(),
             sender_name: sender_name.to_string(),
+            frame_callback: None,
         })
     }
 
@@ -46,10 +76,35 @@ impl Receiver {
 
     pub fn destroy(&mut self) {
         if let Some(h) = self.handle.take() {
+            // Destroy signals the push worker and joins it before releasing
+            // anything, so once it returns no trampoline call can be running
+            // or start — only then is it safe to free the boxed callback.
             unsafe {
                 ffi::spout_receiver_destroy(h);
             }
         }
+        self.frame_callback = None;
+    }
+
+    /// Subscribe (`Some`) or unsubscribe (`None`) the push path. The C side
+    /// stops and joins any running push worker before starting a new one, so
+    /// the previous callback is no longer running when this returns and can
+    /// be dropped. No-op after `destroy`.
+    pub fn set_frame_callback(&mut self, callback: Option<FrameCallback>) {
+        let Some(h) = self.handle else {
+            return;
+        };
+        let next = callback.map(Box::new);
+        match &next {
+            Some(boxed) => unsafe {
+                let ctx = &**boxed as *const FrameCallback as *mut std::ffi::c_void;
+                ffi::spout_receiver_set_frame_callback(h, Some(frame_callback_trampoline), ctx);
+            },
+            None => unsafe {
+                ffi::spout_receiver_set_frame_callback(h, None, std::ptr::null_mut());
+            },
+        }
+        self.frame_callback = next;
     }
 
     pub fn has_new_frame(&self) -> bool {
@@ -206,5 +261,40 @@ pub fn list_senders_json() -> Result<String, String> {
             .map_err(|e| e.to_string());
         ffi::spout_discovery_free_string(ptr);
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- spout_ring_pick_slot: pure slot picker for the push staging ring.
+    // A slot is free when the last NT handle handed out for it no longer
+    // refers to its texture (held == 0) and no staging copy is writing it
+    // (gpu_busy == 0). Mirrors the macOS syphon_ring_pick_slot cases.
+
+    fn pick_slot(held: &[u8], busy: &[u8]) -> i32 {
+        assert_eq!(held.len(), busy.len());
+        unsafe { ffi::spout_ring_pick_slot(held.as_ptr(), busy.as_ptr(), held.len() as u32) }
+    }
+
+    #[test]
+    fn ring_pick_slot_returns_first_free_slot() {
+        assert_eq!(pick_slot(&[1, 0, 0], &[0, 0, 0]), 1);
+    }
+
+    #[test]
+    fn ring_pick_slot_skips_gpu_busy_slot() {
+        assert_eq!(pick_slot(&[0, 0, 0], &[1, 0, 0]), 1);
+    }
+
+    #[test]
+    fn ring_pick_slot_returns_minus_one_when_all_held() {
+        assert_eq!(pick_slot(&[1, 1, 1], &[0, 0, 0]), -1);
+    }
+
+    #[test]
+    fn ring_pick_slot_empty_ring() {
+        assert_eq!(pick_slot(&[], &[]), -1);
     }
 }

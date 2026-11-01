@@ -118,6 +118,41 @@ int syphon_receiver_receive_shared_iosurface(SyphonReceiverHandle handle,
 void syphon_receiver_set_flip_y(SyphonReceiverHandle handle, int flip);
 
 // ============================================================
+// Push receive path (staging ring + frame callback)
+// ============================================================
+
+// Invoked on a Metal command-buffer completion thread once a frame has been
+// staged (GPU→GPU) into one of the receiver's ring IOSurfaces and the staging
+// command buffer has completed. `iosurface` is an IOSurfaceRef carrying exactly
+// one CFRetain owned by the callee — balance it via Electron's imported
+// texture release or native_close_shared_iosurface. pixel_format_code uses the
+// same table as syphon_receiver_receive_shared_iosurface (0 bgra, 1 rgba,
+// 2 rgbaf16). Must not block: it runs while the receiver's callback mutex is
+// held.
+typedef void (*syphon_frame_callback)(void* ctx,
+                                      void* iosurface,
+                                      uint32_t width,
+                                      uint32_t height,
+                                      uint32_t pixel_format_code);
+
+// Subscribe (cb != NULL) or unsubscribe (cb == NULL) the push path. While
+// subscribed, every Syphon new-frame notification is staged into a free slot
+// of a 3-slot IOSurface ring without waiting on the GPU; frames are dropped
+// when every slot is still held by a consumer. Thread-safe with respect to the
+// Syphon handler and completion handlers: once this returns with cb == NULL,
+// no further invocation of the previous callback happens and none is running.
+// The poll path (syphon_receiver_receive_shared_iosurface) is unaffected.
+void syphon_receiver_set_frame_callback(SyphonReceiverHandle handle,
+                                        syphon_frame_callback cb,
+                                        void* ctx);
+
+// Pure helper: returns the first index i in [0, n) with retain_counts[i] == 1
+// (only the bridge holds the slot) and gpu_busy[i] == 0, else -1.
+int32_t syphon_ring_pick_slot(const uint32_t* retain_counts,
+                              const uint8_t* gpu_busy,
+                              uint32_t n);
+
+// ============================================================
 // Pixel format utilities
 // ============================================================
 

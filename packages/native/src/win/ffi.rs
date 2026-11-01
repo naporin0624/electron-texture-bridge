@@ -30,6 +30,14 @@ extern "C" {
     pub fn spout_receiver_is_connected(handle: SpoutReceiverHandle) -> i32;
     pub fn spout_receiver_get_width(handle: SpoutReceiverHandle) -> u32;
     pub fn spout_receiver_get_height(handle: SpoutReceiverHandle) -> u32;
+    pub fn spout_receiver_set_frame_callback(
+        handle: SpoutReceiverHandle,
+        cb: Option<SpoutFrameCallback>,
+        ctx: *mut std::ffi::c_void,
+    );
+    /// Pure ring-slot picker (used by the C++ push path + Rust tests).
+    #[allow(dead_code)]
+    pub fn spout_ring_pick_slot(held: *const u8, gpu_busy: *const u8, n: u32) -> i32;
 
     // ---- Discovery ----
     pub fn spout_discovery_list_senders() -> *mut c_char;
@@ -40,3 +48,15 @@ extern "C" {
 }
 
 pub type SpoutReceiverHandle = *mut std::ffi::c_void;
+
+/// Push-path frame callback. Invoked on the receiver's push worker thread with
+/// a freshly duplicated NT HANDLE owned by the callee, once the staging copy
+/// into a ring slot has completed on the GPU. `dxgi_format` is the raw
+/// `DXGI_FORMAT` of the staged texture.
+pub type SpoutFrameCallback = unsafe extern "C" fn(
+    ctx: *mut std::ffi::c_void,
+    nt_handle: *mut std::ffi::c_void,
+    width: u32,
+    height: u32,
+    dxgi_format: u32,
+);

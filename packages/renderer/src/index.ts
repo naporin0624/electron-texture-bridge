@@ -20,6 +20,7 @@ export type {
 } from "./receiver";
 export type {
   SharedTextureReceiverOptions,
+  SharedTextureReceiveMode,
   SharedTextureReceiverBridge,
   SharedTextureReceiverBridgeEvents,
 } from "./shared-texture-receiver";

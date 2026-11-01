@@ -295,12 +295,230 @@ pub struct JsSenderInfo {
     pub uuid: Option<String>,
 }
 
+/// Build the JS frame object for a macOS shared IOSurface on the poll path
+/// (`receiveSharedTexture`). Emits the same 8-byte LE handle encoding and
+/// `ownerPid` as the push path's `PushFrame::into_shared_texture_frame`.
+#[cfg(target_os = "macos")]
+fn shared_texture_frame_from_iosurface(
+    info: &mac::receiver::SharedIoSurfaceInfo,
+) -> SharedTextureFrame {
+    SharedTextureFrame {
+        width: info.width,
+        height: info.height,
+        pixel_format: info.pixel_format_string(),
+        owner_pid: std::process::id(),
+        handle: info.iosurface_ptr.to_le_bytes().to_vec().into(),
+    }
+}
+
+/// Native receiver / frame types the push path is generic over. Each platform
+/// receiver exposes the same `set_frame_callback` shape; only the frame
+/// metadata and how an unconsumed handle is closed differ.
+#[cfg(target_os = "macos")]
+type NativeReceiver = mac::receiver::Receiver;
+#[cfg(target_os = "macos")]
+type NativeFrameCallback = mac::receiver::FrameCallback;
+#[cfg(target_os = "macos")]
+type NativeFrameInfo = mac::receiver::SharedIoSurfaceInfo;
+#[cfg(target_os = "windows")]
+type NativeReceiver = win::receiver::Receiver;
+#[cfg(target_os = "windows")]
+type NativeFrameCallback = win::receiver::FrameCallback;
+#[cfg(target_os = "windows")]
+type NativeFrameInfo = win::receiver::SharedTextureHandleInfo;
+
+/// Platform-neutral push frame in transit from the native thread to JS. The
+/// pixel format is resolved on the native side so the JS-thread conversion
+/// cannot fail.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+struct PushFrame {
+    handle: u64,
+    width: u32,
+    height: u32,
+    pixel_format: String,
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+impl PushFrame {
+    /// Same 8-byte LE handle encoding and `ownerPid` as `receiveSharedTexture`.
+    fn into_shared_texture_frame(self) -> SharedTextureFrame {
+        SharedTextureFrame {
+            width: self.width,
+            height: self.height,
+            pixel_format: self.pixel_format,
+            owner_pid: std::process::id(),
+            handle: self.handle.to_le_bytes().to_vec().into(),
+        }
+    }
+}
+
+/// Describe a natively staged frame for JS. `Err(handle)` means it cannot be
+/// described to Electron; the caller still owns `handle` and must close it.
+#[cfg(target_os = "macos")]
+fn push_frame_from_native(info: NativeFrameInfo) -> std::result::Result<PushFrame, u64> {
+    Ok(PushFrame {
+        handle: info.iosurface_ptr,
+        width: info.width,
+        height: info.height,
+        pixel_format: info.pixel_format_string(),
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn push_frame_from_native(info: NativeFrameInfo) -> std::result::Result<PushFrame, u64> {
+    match dxgi_format_to_pixel_format(info.format) {
+        Ok(pixel_format) => Ok(PushFrame {
+            handle: info.nt_handle,
+            width: info.width,
+            height: info.height,
+            pixel_format: pixel_format.to_string(),
+        }),
+        Err(_) => Err(info.nt_handle),
+    }
+}
+
+/// Release a pushed handle that will never reach JS.
+#[cfg(target_os = "macos")]
+fn close_pending_handle(handle: u64) {
+    let _ = mac::close_shared_iosurface(handle);
+}
+
+#[cfg(target_os = "windows")]
+fn close_pending_handle(handle: u64) {
+    let _ = win::close_shared_handle(handle);
+}
+
+/// Native handles (IOSurface pointers / NT HANDLEs) queued on the push TSFN
+/// but not yet handed to JS. Each is owned by whoever would receive it; on
+/// unsubscribe the aborted TSFN never dispatches them, so they are released
+/// from here instead.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+type PendingHandles = std::sync::Arc<std::sync::Mutex<Vec<u64>>>;
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn lock_pending(pending: &PendingHandles) -> std::sync::MutexGuard<'_, Vec<u64>> {
+    pending
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Remove one occurrence of `handle` from the pending list. Returns whether
+/// it was present (i.e. whether the caller now owns it).
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn take_pending(pending: &PendingHandles, handle: u64) -> bool {
+    let mut guard = lock_pending(pending);
+    match guard.iter().position(|&p| p == handle) {
+        Some(index) => {
+            guard.swap_remove(index);
+            true
+        }
+        None => false,
+    }
+}
+
+/// One `onSharedTexture` subscription: the JS callback wrapped in a
+/// ThreadsafeFunction plus the frames queued on it.
+///
+/// Must be dropped only after the native receiver stopped invoking the sink
+/// (`Receiver::set_frame_callback(None)` or `destroy`). Dropping aborts the
+/// TSFN — Node never dispatches queued items of an aborted TSFN, so no JS
+/// callback fires afterwards — and releases every still-queued handle.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+struct PushSubscription {
+    tsfn: Option<
+        napi::threadsafe_function::ThreadsafeFunction<
+            PushFrame,
+            napi::threadsafe_function::ErrorStrategy::Fatal,
+        >,
+    >,
+    pending: PendingHandles,
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+impl PushSubscription {
+    fn new(callback: &JsFunction) -> Result<Self> {
+        let pending: PendingHandles = Default::default();
+        let pending_js = pending.clone();
+        // Runs on the JS thread right before the callback is invoked: from
+        // here on JS owns the handle.
+        let tsfn = callback.create_threadsafe_function(
+            0,
+            move |ctx: napi::threadsafe_function::ThreadSafeCallContext<PushFrame>| {
+                take_pending(&pending_js, ctx.value.handle);
+                Ok(vec![ctx.value.into_shared_texture_frame()])
+            },
+        )?;
+        Ok(Self {
+            tsfn: Some(tsfn),
+            pending,
+        })
+    }
+
+    /// Native-side sink: runs on the platform's push thread (Metal completion
+    /// thread / Spout push worker), queues the frame to JS without blocking,
+    /// and releases the handle if it cannot be described or queued.
+    fn frame_sink(&self) -> Option<NativeFrameCallback> {
+        let tsfn = self.tsfn.as_ref()?.clone();
+        let pending = self.pending.clone();
+        let logged_unsupported = std::sync::atomic::AtomicBool::new(false);
+        Some(Box::new(move |info: NativeFrameInfo| {
+            let frame = match push_frame_from_native(info) {
+                Ok(frame) => frame,
+                Err(handle) => {
+                    if !logged_unsupported.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                        eprintln!(
+                            "[texture-bridge] onSharedTexture: dropping frames with an unsupported pixel format"
+                        );
+                    }
+                    close_pending_handle(handle);
+                    return;
+                }
+            };
+            let handle = frame.handle;
+            lock_pending(&pending).push(handle);
+            let status = tsfn.call(
+                frame,
+                napi::threadsafe_function::ThreadsafeFunctionCallMode::NonBlocking,
+            );
+            if status != Status::Ok && take_pending(&pending, handle) {
+                close_pending_handle(handle);
+            }
+        }))
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+impl Drop for PushSubscription {
+    fn drop(&mut self) {
+        if let Some(tsfn) = self.tsfn.take() {
+            let _ = tsfn.abort();
+        }
+        let leftovers = std::mem::take(&mut *lock_pending(&self.pending));
+        for handle in leftovers {
+            close_pending_handle(handle);
+        }
+    }
+}
+
+/// Stop native push delivery, then tear the subscription down. Order matters:
+/// the native unsubscribe guarantees the sink is no longer running before the
+/// TSFN is aborted and queued handles are released.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn detach_push(inner: &mut NativeReceiver, push: &mut Option<PushSubscription>) {
+    inner.set_frame_callback(None);
+    push.take();
+}
+
 #[napi]
 pub struct TextureReceiver {
     #[cfg(target_os = "macos")]
     inner: Option<mac::receiver::Receiver>,
     #[cfg(target_os = "windows")]
     inner: Option<win::receiver::Receiver>,
+    /// Declared after `inner` so an un-stopped receiver drops (destroys) the
+    /// native side before the subscription.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    push: Option<PushSubscription>,
 
     #[allow(dead_code)]
     sender_name: String,
@@ -340,6 +558,8 @@ impl TextureReceiver {
 
         let result = Self {
             inner: Some(inner),
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            push: None,
             sender_name,
             #[cfg(target_os = "macos")]
             app_name,
@@ -415,17 +635,7 @@ impl TextureReceiver {
         #[cfg(target_os = "macos")]
         {
             match inner.receive_shared_iosurface() {
-                Ok(Some(info)) => {
-                    let mut bytes = vec![0u8; 8];
-                    bytes.copy_from_slice(&info.iosurface_ptr.to_le_bytes());
-                    Ok(Some(SharedTextureFrame {
-                        width: info.width,
-                        height: info.height,
-                        pixel_format: info.pixel_format_string(),
-                        owner_pid: std::process::id(),
-                        handle: bytes.into(),
-                    }))
-                }
+                Ok(Some(info)) => Ok(Some(shared_texture_frame_from_iosurface(&info))),
                 Ok(None) => Ok(None),
                 Err(e) => Err(Error::from_reason(e)),
             }
@@ -467,9 +677,59 @@ impl TextureReceiver {
     #[napi]
     pub fn stop(&mut self) -> Result<()> {
         if let Some(mut r) = self.inner.take() {
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            detach_push(&mut r, &mut self.push);
             r.destroy();
         }
         Ok(())
+    }
+
+    /// Subscribe to frames pushed as soon as they are staged on the GPU
+    /// (macOS: Syphon; Windows: Spout), instead of polling
+    /// `receiveSharedTexture`.
+    ///
+    /// The callback runs on the JS thread with a `SharedTextureFrame` whose
+    /// `handle` follows the same ownership contract as `receiveSharedTexture`:
+    /// pass it to `closeNativeHandle()` exactly once, also after
+    /// `importSharedTexture` (Electron keeps its own reference). Frames are
+    /// staged into a 3-slot ring; when no slot is free the frame is dropped
+    /// natively. On macOS a slot counts as held while it is retained beyond
+    /// the ring's own reference or `IOSurfaceIsInUse` reports it in use
+    /// downstream; on Windows a slot is effectively free once the caller
+    /// closes its handle, so the ring round-robins over its 3 slots. Passing `null` unsubscribes; calling again
+    /// replaces the previous callback. After `stop()` returns no callback
+    /// fires. While subscribed, the receiver keeps the event loop alive.
+    ///
+    /// Throws `"TextureReceiver has been stopped"` after `stop()`, and
+    /// `"onSharedTexture is not supported on this platform"` elsewhere.
+    #[napi(ts_args_type = "callback: ((frame: SharedTextureFrame) => void) | null")]
+    #[cfg_attr(
+        not(any(target_os = "macos", target_os = "windows")),
+        allow(unused_variables)
+    )]
+    pub fn on_shared_texture(&mut self, callback: Option<JsFunction>) -> Result<()> {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            let inner = self
+                .inner
+                .as_mut()
+                .ok_or_else(|| Error::from_reason("TextureReceiver has been stopped"))?;
+            detach_push(inner, &mut self.push);
+            let Some(func) = callback else {
+                return Ok(());
+            };
+            let subscription = PushSubscription::new(&func)?;
+            inner.set_frame_callback(subscription.frame_sink());
+            self.push = Some(subscription);
+            Ok(())
+        }
+
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            Err(Error::from_reason(
+                "onSharedTexture is not supported on this platform",
+            ))
+        }
     }
 
     /// Toggle whether `receiveSharedTexture` applies a vertical flip when

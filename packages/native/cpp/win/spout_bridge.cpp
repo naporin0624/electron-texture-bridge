@@ -7,16 +7,23 @@
 // implicit contract that `*ppTexture` be pre-allocated, which broke the
 // zero-copy GPU receive path in our configuration.
 
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <memory>
+#include <mutex>
 #include <set>
 #include <string>
+#include <system_error>
+#include <thread>
 #include <d3d11_1.h>
+#include <d3d11_4.h>  // ID3D11Multithread
 #include "SpoutDX.h"
 #include "SpoutSenderNames.h"
 #include "SpoutFrameCount.h"
 #include "SpoutDirectX.h"
+#include <mmsystem.h> // timeBeginPeriod / timeEndPeriod (winmm)
 
 struct SpoutBridge {
     spoutDX sender;
@@ -143,42 +150,57 @@ int32_t spout_bridge_resize(void* handle, uint32_t width, uint32_t height) {
 // pre-allocation contract that broke our zero-copy path.
 // ============================================================
 
+// Push receive path (see "Push receive path" below for the design). The
+// worker is created by spout_receiver_set_frame_callback and owns its staging
+// ring; the bridge only keeps the handle needed to stop + join it.
+struct SpoutPushWorker;
+
 struct SpoutReceiverBridge {
     // D3D11 — owned by this bridge (one device per receiver instance).
-    ID3D11Device*        device;
-    ID3D11Device1*       device1;
-    ID3D11DeviceContext* context;
+    ID3D11Device*        device = nullptr;
+    ID3D11Device1*       device1 = nullptr;
+    ID3D11DeviceContext* context = nullptr;
+
+    // Serializes every use of the Spout primitives, the cached sender
+    // texture and the immediate context between the JS-thread poll entry
+    // points and the push worker thread. Uncontended unless both are active.
+    std::mutex           ioMutex;
 
     // Spout SDK primitives. spoutSenderNames publishes sender info via a
     // memory-mapped file; spoutFrameCount manages per-sender frame semaphore
     // and named mutex; spoutDirectX wraps OpenSharedResource / CreateDX11device.
-    spoutSenderNames* senderNames;
-    spoutFrameCount*  frameCount;
-    spoutDirectX*     directX;
+    spoutSenderNames* senderNames = nullptr;
+    spoutFrameCount*  frameCount = nullptr;
+    spoutDirectX*     directX = nullptr;
 
-    // Cached sender metadata.
-    char              senderName[256];
-    unsigned int      senderWidth;
-    unsigned int      senderHeight;
-    DWORD             senderFormat;      // DXGI_FORMAT as DWORD (e.g. 87=BGRA)
-    HANDLE            cachedSenderHandle;
-    ID3D11Texture2D*  senderTexture;     // opened from cachedSenderHandle
-    bool              frameCountEnabled;
-    bool              accessMutexCreated;
-    bool              connected;
+    // Cached sender metadata. Width/height/connected are atomic because the
+    // JS-thread getters read them while the push worker updates them.
+    char                      senderName[256] = {};
+    std::atomic<unsigned int> senderWidth{0};
+    std::atomic<unsigned int> senderHeight{0};
+    DWORD                     senderFormat = 0; // DXGI_FORMAT as DWORD (e.g. 87=BGRA)
+    HANDLE                    cachedSenderHandle = nullptr;
+    ID3D11Texture2D*          senderTexture = nullptr; // opened from cachedSenderHandle
+    bool                      frameCountEnabled = false;
+    bool                      accessMutexCreated = false;
+    std::atomic<bool>         connected{false};
 
     // Our NT-shared output staging (per-frame DuplicateHandle target).
-    ID3D11Texture2D*  ntStaging;
-    unsigned int      ntStagingWidth;
-    unsigned int      ntStagingHeight;
-    DWORD             ntStagingFormat;
-    HANDLE            cachedNtHandle;
+    ID3D11Texture2D*  ntStaging = nullptr;
+    unsigned int      ntStagingWidth = 0;
+    unsigned int      ntStagingHeight = 0;
+    DWORD             ntStagingFormat = 0;
+    HANDLE            cachedNtHandle = nullptr;
 
     // CPU-mappable staging for the RGBA readback path.
-    ID3D11Texture2D*  cpuStaging;
-    unsigned int      cpuStagingWidth;
-    unsigned int      cpuStagingHeight;
-    DWORD             cpuStagingFormat;
+    ID3D11Texture2D*  cpuStaging = nullptr;
+    unsigned int      cpuStagingWidth = 0;
+    unsigned int      cpuStagingHeight = 0;
+    DWORD             cpuStagingFormat = 0;
+
+    // Push path worker, or null while nobody is subscribed. Only touched on
+    // the JS thread (set_frame_callback / destroy).
+    SpoutPushWorker*  pushWorker = nullptr;
 };
 
 // Release any cached reference to the sender's shared texture. Called when
@@ -251,6 +273,80 @@ static bool refresh_sender(SpoutReceiverBridge* bridge) {
     return true;
 }
 
+// Create one NT-shared texture of (width, height, format) usable as a
+// CopyResource destination and as a shader-readable source downstream, plus
+// the NT HANDLE minted for it via CreateSharedHandle. On success the caller
+// owns one reference on *outTexture and *outHandle. Shared by the poll path's
+// single ntStaging and every push-path ring slot. `tag` prefixes log lines.
+static bool create_nt_shared_texture(ID3D11Device* device,
+                                     unsigned int width,
+                                     unsigned int height,
+                                     DWORD format,
+                                     const char* tag,
+                                     ID3D11Texture2D** outTexture,
+                                     HANDLE* outHandle) {
+    *outTexture = nullptr;
+    *outHandle = nullptr;
+    if (!device || width == 0 || height == 0) return false;
+
+    D3D11_TEXTURE2D_DESC desc = {};
+    desc.Width = width;
+    desc.Height = height;
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.Format = static_cast<DXGI_FORMAT>(format);
+    desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+    // NT handle textures must combine NTHANDLE with SHARED or SHARED_KEYEDMUTEX
+    // per D3D11 validation. We use the plain SHARED pairing so readers do not
+    // have to acquire a keyed mutex on every frame — `CopyResource` inside
+    // this file is the only writer, so no mutex sync is required between
+    // writer and reader.
+    desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED_NTHANDLE
+                   | D3D11_RESOURCE_MISC_SHARED;
+
+    ID3D11Texture2D* texture = nullptr;
+    HRESULT hr = device->CreateTexture2D(&desc, nullptr, &texture);
+    if (FAILED(hr) || !texture) {
+        fprintf(stderr,
+                "[SpoutBridge] %s: CreateTexture2D failed hr=0x%08lx w=%u h=%u fmt=%lu\n",
+                tag, static_cast<unsigned long>(hr), width, height,
+                static_cast<unsigned long>(format));
+        return false;
+    }
+
+    IDXGIResource1* dxgi = nullptr;
+    hr = texture->QueryInterface(
+        __uuidof(IDXGIResource1), reinterpret_cast<void**>(&dxgi));
+    if (FAILED(hr) || !dxgi) {
+        fprintf(stderr,
+                "[SpoutBridge] %s: QueryInterface(IDXGIResource1) failed hr=0x%08lx\n",
+                tag, static_cast<unsigned long>(hr));
+        texture->Release();
+        return false;
+    }
+
+    HANDLE nt_handle = nullptr;
+    hr = dxgi->CreateSharedHandle(
+        nullptr,
+        DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE,
+        nullptr,
+        &nt_handle);
+    dxgi->Release();
+    if (FAILED(hr) || !nt_handle) {
+        fprintf(stderr,
+                "[SpoutBridge] %s: CreateSharedHandle failed hr=0x%08lx\n",
+                tag, static_cast<unsigned long>(hr));
+        texture->Release();
+        return false;
+    }
+
+    *outTexture = texture;
+    *outHandle = nt_handle;
+    return true;
+}
+
 // Allocate or reallocate the NT-shared staging texture to match dims/format.
 // Mints a fresh NT HANDLE via CreateSharedHandle and caches it for
 // per-frame DuplicateHandle.
@@ -272,63 +368,13 @@ static bool ensure_nt_staging(SpoutReceiverBridge* bridge,
         bridge->ntStaging->Release();
         bridge->ntStaging = nullptr;
     }
-    if (!bridge->device || width == 0 || height == 0) return false;
 
-    D3D11_TEXTURE2D_DESC desc = {};
-    desc.Width = width;
-    desc.Height = height;
-    desc.MipLevels = 1;
-    desc.ArraySize = 1;
-    desc.Format = static_cast<DXGI_FORMAT>(format);
-    desc.SampleDesc.Count = 1;
-    desc.Usage = D3D11_USAGE_DEFAULT;
-    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
-    // NT handle textures must combine NTHANDLE with SHARED or SHARED_KEYEDMUTEX
-    // per D3D11 validation. We use the plain SHARED pairing so readers do not
-    // have to acquire a keyed mutex on every frame — `CopyResource` inside
-    // this file is the only writer, so no mutex sync is required between
-    // writer and reader.
-    desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED_NTHANDLE
-                   | D3D11_RESOURCE_MISC_SHARED;
-
-    HRESULT hr = bridge->device->CreateTexture2D(&desc, nullptr, &bridge->ntStaging);
-    if (FAILED(hr)) {
-        fprintf(stderr,
-                "[SpoutBridge] ensure_nt_staging: CreateTexture2D failed hr=0x%08lx w=%u h=%u fmt=%lu\n",
-                static_cast<unsigned long>(hr), width, height, static_cast<unsigned long>(format));
-        bridge->ntStaging = nullptr;
+    if (!create_nt_shared_texture(bridge->device, width, height, format,
+                                  "ensure_nt_staging",
+                                  &bridge->ntStaging, &bridge->cachedNtHandle)) {
         return false;
     }
 
-    IDXGIResource1* dxgi = nullptr;
-    hr = bridge->ntStaging->QueryInterface(
-        __uuidof(IDXGIResource1), reinterpret_cast<void**>(&dxgi));
-    if (FAILED(hr) || !dxgi) {
-        fprintf(stderr,
-                "[SpoutBridge] ensure_nt_staging: QueryInterface(IDXGIResource1) failed hr=0x%08lx\n",
-                static_cast<unsigned long>(hr));
-        bridge->ntStaging->Release();
-        bridge->ntStaging = nullptr;
-        return false;
-    }
-
-    HANDLE nt_handle = nullptr;
-    hr = dxgi->CreateSharedHandle(
-        nullptr,
-        DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE,
-        nullptr,
-        &nt_handle);
-    dxgi->Release();
-    if (FAILED(hr) || !nt_handle) {
-        fprintf(stderr,
-                "[SpoutBridge] ensure_nt_staging: CreateSharedHandle failed hr=0x%08lx\n",
-                static_cast<unsigned long>(hr));
-        bridge->ntStaging->Release();
-        bridge->ntStaging = nullptr;
-        return false;
-    }
-
-    bridge->cachedNtHandle    = nt_handle;
     bridge->ntStagingWidth    = width;
     bridge->ntStagingHeight   = height;
     bridge->ntStagingFormat   = format;
@@ -375,9 +421,441 @@ static bool ensure_cpu_staging(SpoutReceiverBridge* bridge,
     return true;
 }
 
+// ============================================================
+// Push receive path (staging ring + frame callback)
+//
+// Windows counterpart of the macOS Syphon push path. One worker thread per
+// subscribed receiver polls Spout's frame counter about every millisecond,
+// copies each new sender frame GPU→GPU into a free slot of a 3-slot ring of
+// NT-shared textures, waits (without blocking the JS thread) for that copy to
+// complete on the GPU via a D3D11 event query, then hands a freshly
+// duplicated NT HANDLE for the slot to the callback. The poll path
+// (spout_receiver_receive_shared_texture + its single ntStaging) is untouched.
+// ============================================================
+
+// Invoked on the push worker thread. `nt_handle` is a fresh duplicate owned by
+// the callee (Electron's importSharedTexture or native_close_shared_handle
+// closes it). Must not block for long: the worker delivers nothing else while
+// it runs.
+typedef void (*spout_frame_callback)(void* ctx,
+                                     void* nt_handle,
+                                     uint32_t width,
+                                     uint32_t height,
+                                     uint32_t dxgi_format);
+
+// Pure helper: returns the first index i in [0, n) with held[i] == 0 and
+// gpu_busy[i] == 0, else -1.
+int32_t spout_ring_pick_slot(const uint8_t* held,
+                             const uint8_t* gpu_busy,
+                             uint32_t n) {
+    if (!held || !gpu_busy) return -1;
+    for (uint32_t i = 0; i < n; i++) {
+        if (held[i] == 0 && gpu_busy[i] == 0) return static_cast<int32_t>(i);
+    }
+    return -1;
+}
+
+// Number of NT-shared textures in the push staging ring. Three lets one slot
+// be written while up to two are still imported downstream.
+static constexpr uint32_t kSpoutRingSize = 3;
+// Worker wait between Spout frame-counter checks when no new frame arrived.
+static constexpr DWORD kPushIdleWaitMs = 1;
+// Pacing when the sender's frame counter cannot tell new frames apart
+// (Spout "Framecount" registry setting off — the default — or a sender that
+// never increments it): GetNewFrame() then always reports a new frame, so
+// deliver at the poll path's default 16 ms cadence instead of ~1 kHz. Also
+// used while the sender is absent and as the sender re-check interval.
+static constexpr DWORD kPushUncountedIntervalMs = 16;
+// Upper bound on waiting for one staging copy to complete on the GPU.
+static constexpr ULONGLONG kPushGpuWaitTimeoutMs = 1000;
+// Spin iterations (SwitchToThread) before the GPU wait falls back to 1 ms
+// sleeps, so a typical sub-millisecond copy is picked up without a timer tick.
+static constexpr int kPushGpuSpinIterations = 64;
+
+// One ring slot: a receiver-owned NT-shared texture, the NT HANDLE minted for
+// it (DuplicateHandle source), and the value of the last duplicate handed out
+// for it. `lastHandedOut` is owned by the consumer and never closed here — it
+// is only compared against `sharedHandle` to tell whether the consumer still
+// holds the slot.
+struct SpoutRingSlot {
+    ID3D11Texture2D* texture = nullptr;
+    HANDLE           sharedHandle = nullptr;
+    HANDLE           lastHandedOut = nullptr;
+};
+
+struct SpoutPushRing {
+    SpoutRingSlot slots[kSpoutRingSize];
+    unsigned int  width = 0;
+    unsigned int  height = 0;
+    DWORD         format = 0;
+    // Slot search starts after the most recently delivered slot, so even if
+    // the held check under-reports, a slot is reused only after the other two.
+    uint32_t      nextStart = 0;
+    uint64_t      droppedFrames = 0;
+};
+
+struct SpoutPushWorker {
+    std::thread          thread;
+    HANDLE               stopEvent = nullptr; // manual-reset
+    spout_frame_callback callback = nullptr;  // immutable for the worker's life
+    void*                callbackCtx = nullptr;
+};
+
+// `CompareObjectHandles` (kernelbase, Windows 10 1607+) resolved at runtime so
+// the build needs neither a newer SDK header gate nor an extra import library.
+typedef BOOL (WINAPI *CompareObjectHandlesFn)(HANDLE, HANDLE);
+
+static CompareObjectHandlesFn resolve_compare_object_handles() {
+    HMODULE kernelbase = GetModuleHandleW(L"kernelbase.dll");
+    if (!kernelbase) return nullptr;
+    return reinterpret_cast<CompareObjectHandlesFn>(
+        GetProcAddress(kernelbase, "CompareObjectHandles"));
+}
+
+static void release_ring_slot(SpoutRingSlot& slot) {
+    // Duplicates already handed to consumers are independent kernel handles
+    // and keep the shared resource alive until their owners close them.
+    if (slot.sharedHandle) {
+        CloseHandle(slot.sharedHandle);
+        slot.sharedHandle = nullptr;
+    }
+    if (slot.texture) {
+        slot.texture->Release();
+        slot.texture = nullptr;
+    }
+    slot.lastHandedOut = nullptr;
+}
+
+static void release_push_ring(SpoutPushRing& ring) {
+    for (uint32_t i = 0; i < kSpoutRingSize; i++) {
+        release_ring_slot(ring.slots[i]);
+    }
+    ring.width = 0;
+    ring.height = 0;
+    ring.format = 0;
+    ring.nextStart = 0;
+}
+
+// (Re)allocate every slot when the sender's size/format differs from the
+// ring's. All-or-nothing: on failure the ring is left empty. Caller holds
+// bridge->ioMutex.
+static bool ensure_push_ring(SpoutReceiverBridge* bridge,
+                             SpoutPushRing& ring,
+                             unsigned int width,
+                             unsigned int height,
+                             DWORD format) {
+    if (ring.slots[0].texture &&
+        ring.width == width &&
+        ring.height == height &&
+        ring.format == format) {
+        return true;
+    }
+    release_push_ring(ring);
+    for (uint32_t i = 0; i < kSpoutRingSize; i++) {
+        SpoutRingSlot& slot = ring.slots[i];
+        if (!create_nt_shared_texture(bridge->device, width, height, format,
+                                      "ensure_push_ring",
+                                      &slot.texture, &slot.sharedHandle)) {
+            release_push_ring(ring);
+            return false;
+        }
+    }
+    ring.width = width;
+    ring.height = height;
+    ring.format = format;
+    return true;
+}
+
+// Windows analogue of macOS's "retain count back to 1": the slot is held while
+// the last duplicate handed out for it still refers to the slot's resource.
+// Once the consumer closes it, the handle value is invalid or reused for an
+// unrelated object, and CompareObjectHandles returns FALSE. Without
+// CompareObjectHandles a handed-out slot counts as held (conservative drop).
+//
+// Caveat: Electron's importSharedTexture never adopts this handle — it
+// DuplicateHandle()s its own copy — and the caller closes ours right after
+// the import call returns. So with CompareObjectHandles available this check
+// effectively always sees the slot free by the time the next frame is picked:
+// it does NOT detect a slot still imported downstream, and the ring degrades
+// to round-robin over kSpoutRingSize slots (still strictly better than the
+// single staging texture the poll path reuses). Without CompareObjectHandles
+// (pre-1607) the "held once handed out" rule never clears, so each slot is
+// used once and then every later frame is dropped.
+static bool ring_slot_is_held(const SpoutRingSlot& slot, CompareObjectHandlesFn compare) {
+    if (!slot.lastHandedOut) return false;
+    if (!compare) return true;
+    return compare(slot.lastHandedOut, slot.sharedHandle) != FALSE;
+}
+
+// Pick a free slot index, searching from ring.nextStart, or -1. gpu_busy is
+// always 0 here: the worker waits for each copy before staging the next one,
+// so no slot is ever being written at pick time. It is kept for parity with
+// the macOS picker, where completion is asynchronous.
+static int32_t pick_push_slot(const SpoutPushRing& ring, CompareObjectHandlesFn compare) {
+    uint8_t held[kSpoutRingSize];
+    uint8_t busy[kSpoutRingSize];
+    for (uint32_t i = 0; i < kSpoutRingSize; i++) {
+        const SpoutRingSlot& slot = ring.slots[(ring.nextStart + i) % kSpoutRingSize];
+        held[i] = ring_slot_is_held(slot, compare) ? 1 : 0;
+        busy[i] = 0;
+    }
+    const int32_t offset = spout_ring_pick_slot(held, busy, kSpoutRingSize);
+    if (offset < 0) return -1;
+    return static_cast<int32_t>((ring.nextStart + static_cast<uint32_t>(offset)) % kSpoutRingSize);
+}
+
+enum class GpuWaitResult { Done, Stopped, Failed };
+
+// Log the first failure and then every 300th, so a removed device does not
+// flood stderr at frame rate.
+static bool should_log_failure(uint64_t& failures) {
+    failures++;
+    return failures == 1 || failures % 300 == 0;
+}
+
+// Wait for `query` (ended right after the staging copy) to signal, without
+// holding ioMutex across the wait. Returns Stopped as soon as the stop event
+// is set so unsubscribe/destroy never waits on the GPU.
+static GpuWaitResult wait_for_staging_copy(SpoutReceiverBridge* bridge,
+                                           ID3D11Query* query,
+                                           HANDLE stopEvent,
+                                           uint64_t& failures) {
+    const ULONGLONG deadline = GetTickCount64() + kPushGpuWaitTimeoutMs;
+    for (int i = 0;; i++) {
+        HRESULT hr;
+        {
+            std::lock_guard<std::mutex> lock(bridge->ioMutex);
+            hr = bridge->context->GetData(query, nullptr, 0,
+                                          D3D11_ASYNC_GETDATA_DONOTFLUSH);
+        }
+        if (hr == S_OK) return GpuWaitResult::Done;
+        if (FAILED(hr)) {
+            if (should_log_failure(failures)) {
+                fprintf(stderr,
+                        "[SpoutBridge] push: GetData(event query) failed hr=0x%08lx "
+                        "(%llu failure(s))\n",
+                        static_cast<unsigned long>(hr),
+                        static_cast<unsigned long long>(failures));
+            }
+            return GpuWaitResult::Failed;
+        }
+        if (GetTickCount64() > deadline) {
+            if (should_log_failure(failures)) {
+                fprintf(stderr,
+                        "[SpoutBridge] push: staging copy did not complete within %llu ms "
+                        "(%llu failure(s))\n",
+                        static_cast<unsigned long long>(kPushGpuWaitTimeoutMs),
+                        static_cast<unsigned long long>(failures));
+            }
+            return GpuWaitResult::Failed;
+        }
+        const DWORD waitMs = i < kPushGpuSpinIterations ? 0 : 1;
+        if (WaitForSingleObject(stopEvent, waitMs) == WAIT_OBJECT_0) {
+            return GpuWaitResult::Stopped;
+        }
+        if (waitMs == 0) SwitchToThread();
+    }
+}
+
+// What one worker iteration staged, if anything.
+struct StagedFrame {
+    int32_t      slot = -1;
+    unsigned int width = 0;
+    unsigned int height = 0;
+    DWORD        format = 0;
+};
+
+// Per-worker loop state, owned by the worker thread.
+struct PushLoopState {
+    SpoutPushRing          ring;
+    ID3D11Query*           query = nullptr;
+    CompareObjectHandlesFn compare = nullptr;
+    ULONGLONG              lastSenderCheck = 0;
+    uint64_t               gpuWaitFailures = 0;
+};
+
+// Under ioMutex: detect a new sender frame, (re)allocate the ring, pick a
+// slot and encode the copy + event query. Returns the wait before the next
+// iteration; `out.slot >= 0` when a copy was submitted.
+static DWORD stage_push_frame(SpoutReceiverBridge* bridge,
+                              PushLoopState& state,
+                              StagedFrame& out) {
+    std::lock_guard<std::mutex> lock(bridge->ioMutex);
+
+    // Re-check the sender (CheckSender opens shared memory) only when
+    // disconnected or every kPushUncountedIntervalMs, so the 1 ms idle loop
+    // stays cheap; is_connected still notices a vanished sender.
+    const ULONGLONG now = GetTickCount64();
+    const bool checkDue =
+        !bridge->connected || now - state.lastSenderCheck >= kPushUncountedIntervalMs;
+    if (checkDue) {
+        state.lastSenderCheck = now;
+        if (!refresh_sender(bridge)) return kPushUncountedIntervalMs;
+    }
+
+    if (!bridge->frameCount->GetNewFrame()) return kPushIdleWaitMs;
+    const bool counted = bridge->frameCount->IsFrameCountEnabled() &&
+                         bridge->frameCount->GetSenderFrame() > 0;
+    const DWORD nextWait = counted ? 0 : kPushUncountedIntervalMs;
+
+    // A new frame may come with a resize / new share handle: refresh (unless
+    // just done) so the copy uses the current sender texture and the ring
+    // matches it.
+    if (!checkDue && !refresh_sender(bridge)) return kPushUncountedIntervalMs;
+    const unsigned int width = bridge->senderWidth;
+    const unsigned int height = bridge->senderHeight;
+    const DWORD format = bridge->senderFormat;
+
+    // A size/format change reallocates the ring and still stages this frame.
+    if (!ensure_push_ring(bridge, state.ring, width, height, format)) {
+        return kPushUncountedIntervalMs;
+    }
+
+    const int32_t slot = pick_push_slot(state.ring, state.compare);
+    if (slot < 0) {
+        if (should_log_failure(state.ring.droppedFrames)) {
+            fprintf(stderr,
+                    "[SpoutBridge] push: all %u ring slots still held downstream, "
+                    "dropped %llu frame(s) so far\n",
+                    kSpoutRingSize,
+                    static_cast<unsigned long long>(state.ring.droppedFrames));
+        }
+        return nextWait == 0 ? kPushIdleWaitMs : nextWait;
+    }
+
+    if (!bridge->frameCount->CheckTextureAccess(bridge->senderTexture)) {
+        return kPushIdleWaitMs;
+    }
+    bridge->context->CopyResource(state.ring.slots[slot].texture, bridge->senderTexture);
+    bridge->context->End(state.query);
+    bridge->context->Flush();
+    bridge->frameCount->AllowTextureAccess(bridge->senderTexture);
+
+    out.slot = slot;
+    out.width = width;
+    out.height = height;
+    out.format = format;
+    return nextWait;
+}
+
+// After the copy completed: mint the consumer's duplicate and invoke the
+// callback. Exactly one exit between DuplicateHandle and the callback (stop
+// requested), and it closes the duplicate.
+static void deliver_push_frame(SpoutPushWorker* worker,
+                               PushLoopState& state,
+                               const StagedFrame& staged) {
+    SpoutRingSlot& slot = state.ring.slots[staged.slot];
+    HANDLE duplicate = nullptr;
+    if (!DuplicateHandle(GetCurrentProcess(), slot.sharedHandle,
+                         GetCurrentProcess(), &duplicate,
+                         0, FALSE, DUPLICATE_SAME_ACCESS) || !duplicate) {
+        fprintf(stderr, "[SpoutBridge] push: DuplicateHandle failed (err=%lu)\n",
+                static_cast<unsigned long>(GetLastError()));
+        return;
+    }
+    if (WaitForSingleObject(worker->stopEvent, 0) == WAIT_OBJECT_0) {
+        CloseHandle(duplicate);
+        return;
+    }
+    slot.lastHandedOut = duplicate;
+    state.ring.nextStart = (static_cast<uint32_t>(staged.slot) + 1) % kSpoutRingSize;
+    worker->callback(worker->callbackCtx, duplicate,
+                     staged.width, staged.height, static_cast<uint32_t>(staged.format));
+}
+
+static void run_push_worker(SpoutReceiverBridge* bridge, SpoutPushWorker* worker) {
+    PushLoopState state;
+    state.compare = resolve_compare_object_handles();
+    if (!state.compare) {
+        fprintf(stderr,
+                "[SpoutBridge] push: CompareObjectHandles unavailable (needs Windows 10 1607+); "
+                "each ring slot is treated as held once handed out\n");
+    }
+
+    D3D11_QUERY_DESC queryDesc = {};
+    queryDesc.Query = D3D11_QUERY_EVENT;
+    HRESULT hr = bridge->device->CreateQuery(&queryDesc, &state.query);
+    if (FAILED(hr) || !state.query) {
+        fprintf(stderr, "[SpoutBridge] push: CreateQuery(EVENT) failed hr=0x%08lx\n",
+                static_cast<unsigned long>(hr));
+        return;
+    }
+
+    // ~1 ms WaitForSingleObject granularity for the idle wait, scoped to the
+    // worker's lifetime.
+    const bool raisedTimerResolution = timeBeginPeriod(1) == TIMERR_NOERROR;
+
+    for (;;) {
+        StagedFrame staged;
+        const DWORD waitMs = stage_push_frame(bridge, state, staged);
+        if (staged.slot >= 0) {
+            const GpuWaitResult result =
+                wait_for_staging_copy(bridge, state.query, worker->stopEvent,
+                                      state.gpuWaitFailures);
+            if (result == GpuWaitResult::Stopped) break;
+            if (result == GpuWaitResult::Done) deliver_push_frame(worker, state, staged);
+        }
+        if (WaitForSingleObject(worker->stopEvent, waitMs) == WAIT_OBJECT_0) break;
+    }
+
+    if (raisedTimerResolution) timeEndPeriod(1);
+    state.query->Release();
+    release_push_ring(state.ring);
+}
+
+// Signal + join the push worker if one is running. After return no callback
+// is running or can start. JS thread only.
+static void stop_push_worker(SpoutReceiverBridge* bridge) {
+    SpoutPushWorker* worker = bridge->pushWorker;
+    if (!worker) return;
+    bridge->pushWorker = nullptr;
+    SetEvent(worker->stopEvent);
+    if (worker->thread.joinable()) worker->thread.join();
+    CloseHandle(worker->stopEvent);
+    delete worker;
+}
+
+// Start a push worker delivering to (cb, ctx). JS thread only; any previous
+// worker must already be stopped.
+static void start_push_worker(SpoutReceiverBridge* bridge,
+                              spout_frame_callback cb,
+                              void* ctx) {
+    std::unique_ptr<SpoutPushWorker> worker(new SpoutPushWorker());
+    worker->callback = cb;
+    worker->callbackCtx = ctx;
+    worker->stopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!worker->stopEvent) {
+        fprintf(stderr, "[SpoutBridge] push: CreateEvent failed (err=%lu)\n",
+                static_cast<unsigned long>(GetLastError()));
+        return;
+    }
+    try {
+        SpoutPushWorker* raw = worker.get();
+        worker->thread = std::thread([bridge, raw] { run_push_worker(bridge, raw); });
+    } catch (const std::system_error& e) {
+        fprintf(stderr, "[SpoutBridge] push: worker thread start failed: %s\n", e.what());
+        CloseHandle(worker->stopEvent);
+        return;
+    }
+    bridge->pushWorker = worker.release();
+}
+
+// Subscribe (cb != NULL) or unsubscribe (cb == NULL) the push path. Always
+// stops and joins the current worker first, so once this returns the previous
+// callback is not running and will never be called again. The poll path is
+// unaffected. JS thread only.
+void spout_receiver_set_frame_callback(void* handle, spout_frame_callback cb, void* ctx) {
+    if (!handle) return;
+    SpoutReceiverBridge* bridge = static_cast<SpoutReceiverBridge*>(handle);
+    stop_push_worker(bridge);
+    if (!cb) return;
+    start_push_worker(bridge, cb, ctx);
+}
+
 void* spout_receiver_create(const char* sender_name) {
+    // Fields are zero-initialized by their default member initializers (the
+    // struct now holds std::mutex / std::atomic, so it must not be memset).
     SpoutReceiverBridge* bridge = new SpoutReceiverBridge();
-    memset(bridge, 0, sizeof(*bridge));
 
     if (sender_name && sender_name[0]) {
         strncpy(bridge->senderName, sender_name, sizeof(bridge->senderName) - 1);
@@ -420,6 +898,18 @@ void* spout_receiver_create(const char* sender_name) {
     bridge->device->QueryInterface(
         __uuidof(ID3D11Device1), reinterpret_cast<void**>(&bridge->device1));
 
+    // Belt and braces for the push worker: ioMutex already serializes every
+    // immediate-context call between the JS thread and the worker, but turn
+    // on D3D's own context lock too so a future unguarded call cannot corrupt
+    // the context. Non-fatal when unavailable (pre-Creators-Update runtime).
+    ID3D11Multithread* multithread = nullptr;
+    if (SUCCEEDED(bridge->context->QueryInterface(
+            __uuidof(ID3D11Multithread), reinterpret_cast<void**>(&multithread))) &&
+        multithread) {
+        multithread->SetMultithreadProtected(TRUE);
+        multithread->Release();
+    }
+
     return bridge;
 }
 
@@ -427,6 +917,11 @@ void spout_receiver_destroy(void* handle) {
     if (!handle) return;
 
     SpoutReceiverBridge* bridge = static_cast<SpoutReceiverBridge*>(handle);
+
+    // Join the push worker first: after this no callback runs or starts, and
+    // the worker has released its ring, query and Spout access. Everything
+    // below then runs single-threaded.
+    stop_push_worker(bridge);
 
     // Release cached NT handle before NT staging. Duplicates already handed
     // to Electron are independent kernel handles and stay valid until their
@@ -457,6 +952,7 @@ void spout_receiver_destroy(void* handle) {
 int32_t spout_receiver_has_new_frame(void* handle) {
     if (!handle) return 0;
     SpoutReceiverBridge* bridge = static_cast<SpoutReceiverBridge*>(handle);
+    std::lock_guard<std::mutex> lock(bridge->ioMutex);
     return bridge->frameCount->IsFrameNew() ? 1 : 0;
 }
 
@@ -471,6 +967,7 @@ int32_t spout_receiver_receive_rgba(void* handle,
     if (!handle || !out_width || !out_height) return -1;
 
     SpoutReceiverBridge* bridge = static_cast<SpoutReceiverBridge*>(handle);
+    std::lock_guard<std::mutex> lock(bridge->ioMutex);
 
     if (!refresh_sender(bridge)) {
         return -1;
@@ -544,6 +1041,7 @@ int32_t spout_receiver_receive_shared_texture(void* handle,
     }
 
     SpoutReceiverBridge* bridge = static_cast<SpoutReceiverBridge*>(handle);
+    std::lock_guard<std::mutex> lock(bridge->ioMutex);
     *out_nt_handle = nullptr;
 
     if (!refresh_sender(bridge)) {

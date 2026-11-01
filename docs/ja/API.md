@@ -187,7 +187,8 @@ registration.dispose();   // このコンシューマーをプールから削除
 interface SharedTextureReceiverOptions {
   senderName: string;                 // Syphon サーバー / Spout センダー名
   target: Electron.WebContents;       // レシーバーウィンドウの webContents
-  pollIntervalMs?: number;            // デフォルト 16（約 60fps）；drop-latest を適用
+  mode?: "push" | "poll";             // macOS/Windows は "push"、それ以外は "poll" がデフォルト。push は latest-wins
+  pollIntervalMs?: number;            // poll モードのみ。デフォルト 16（約 60fps）；drop-latest を適用
   appName?: string;                   // （macOS のみ）アプリケーション名でフィルタ
   serverUuid?: string;                // （macOS のみ）サーバー UUID で接続
   extraArgs?: readonly unknown[];     // sendSharedTexture(..., ...args) へ転送される
