@@ -74,8 +74,9 @@ impl Drop for Sender {
     }
 }
 
-/// Release a raw `IOSurfaceRef` minted by the receiver but never consumed by
-/// Electron's `importSharedTexture`. Returns `Ok(())` on success, or an error
+/// Release a raw `IOSurfaceRef` minted by the receiver — exactly once per
+/// handle, whether or not it was passed to Electron's `importSharedTexture`
+/// (which retains its own reference). Returns `Ok(())` on success, or an error
 /// describing the failure (null pointer).
 pub fn close_shared_iosurface(raw_ptr: u64) -> Result<(), String> {
     if raw_ptr == 0 {

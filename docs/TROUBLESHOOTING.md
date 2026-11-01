@@ -33,7 +33,7 @@
 
 - **Requires Electron 40+** — uses the `sharedTexture.importSharedTexture` / `sendSharedTexture` / `setSharedTextureReceiver` module. Older Electron will throw at import time.
 - **`listSenders()` shows `<sender>_1` suffixes.** A previous sender process of the same name was killed uncleanly and its shared-memory directory entry is lingering. Start (or restart) the real sender — it will either reclaim the clean name or the stale suffix will go away on its own on the next publisher cycle.
-- **Handle leak after the target window closes.** If you poll `receiveSharedTexture()` directly, always call `closeNativeHandle(frame.handle)` on any path that does not forward the handle to `sharedTexture.importSharedTexture` — including "target was destroyed", "unknown pixel format", and "I decided to drop this frame". `createSharedTextureReceiver` does this for you.
+- **Per-frame handle leak (NT HANDLE count / IOSurface memory grows steadily).** If you poll `receiveSharedTexture()` directly, call `closeNativeHandle(frame.handle)` exactly once on **every** path — including after a successful `sharedTexture.importSharedTexture`, which never takes ownership of the handle (it keeps its own duplicated / retained reference), and on "target was destroyed", "unknown pixel format", and "I decided to drop this frame". `createSharedTextureReceiver` does this for you.
 - **Windows staging texture.** The receiver creates its staging texture with `MISC_SHARED_NTHANDLE | MISC_SHARED` (no keyed mutex), so consumers do not need to `AcquireSync` per frame — Electron imports it directly.
 
 ## Freezing / paint events stop

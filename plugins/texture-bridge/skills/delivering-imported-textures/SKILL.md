@@ -42,7 +42,7 @@ Three properties are the reason this exists:
 
 - **Releases `imported` in a `finally`** — exactly once, on success, on rejection, and on a synchronous throw from `sendSharedTexture`. You never release it yourself; a second release throws.
 - **It is an `async` function**, so calling it never throws synchronously — a throw inside becomes a rejection. `ResultAsync.fromPromise(sendImportedTexture(...), toError)` is the entire neverthrow integration: both failure channels are already funneled into one promise.
-- **It owns only what it was given.** The source stays yours: `e.texture.release()` for a paint texture, `closeNativeHandle(handle)` for a receiver handle.
+- **It owns only what it was given.** The source stays yours: `e.texture.release()` for a paint texture, `closeNativeHandle(handle)` for a receiver handle — once, right after your own `importSharedTexture` call returns, because Electron keeps its own duplicated / retained reference and never adopts yours.
 
 Best-effort call site (never awaited by a paint-rate hot path, never an unhandled rejection):
 

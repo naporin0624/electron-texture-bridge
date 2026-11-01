@@ -388,7 +388,7 @@ interface SharedTextureFrame {
 }
 ```
 
-各 `handle` は新規に発行された、所有権を持つネイティブ参照です。`sharedTexture.importSharedTexture` に渡す（Electron が所有権を引き継ぐ）か、`closeNativeHandle(handle)` を呼んでください — さもないとフレームごとに NT HANDLE / IOSurface がリークします。
+各 `handle` は新規に発行された、所有権を持つネイティブ参照です。すべての `handle` について `closeNativeHandle(handle)` をちょうど 1 回呼んでください。`sharedTexture.importSharedTexture` に渡した後も同じです — `importSharedTexture` は所有権を引き取らず、自前で複製 / retain した参照を持ちます。呼ばないとフレームごとに NT HANDLE / IOSurface の retain がリークします。
 
 ### `closeNativeHandle(handle)`
 
@@ -396,7 +396,7 @@ interface SharedTextureFrame {
 function closeNativeHandle(handle: Buffer): void;
 ```
 
-`receiveSharedTexture()` が発行したものの Electron の `importSharedTexture` に一度も渡されていない、ネイティブの共有テクスチャハンドル（Windows では NT HANDLE、macOS では `IOSurfaceRef`）を解放します。Electron に転送**していない**ハンドルに対してのみ呼び出してください。Electron が所有権を引き継いだハンドルは、Electron 自身が解放します。
+`receiveSharedTexture()` が発行したネイティブの共有テクスチャハンドル（Windows では NT HANDLE、macOS では `IOSurfaceRef`）について、呼び出し側の参照を解放します。import したかどうかに関わらず、ハンドルごとにちょうど 1 回呼んでください。Electron の `importSharedTexture` は自前で複製 / retain した参照を持つため、import の呼び出しが返った直後（成功でも例外でも）に呼んで問題ありません。同じハンドルに 2 回呼ぶと二重 close / 過剰 release になります。
 
 ### リソースのライフサイクル
 

@@ -735,7 +735,34 @@ describe("createSharedTextureReceiver", () => {
     bridge.dispose();
   });
 
-  // -- native handle release on unconsumed paths ---------------------------
+  // -- native handle release: every handle is closed exactly once -----------
+
+  it("closes the native handle after a successful import", async () => {
+    const handleBuf = Buffer.alloc(8);
+    handleBuf.writeUInt32LE(0x0badf00d, 0);
+    mockReceiver.receiveSharedTexture.mockReturnValueOnce(makeFrame({ handle: handleBuf }));
+
+    const bridge = createSharedTextureReceiver({
+      senderName: "test",
+      target: makeMockTarget() as unknown as Electron.WebContents,
+      pollIntervalMs: 10,
+    });
+    bridge.start();
+
+    await vi.advanceTimersByTimeAsync(15);
+
+    expect(mockImportSharedTexture).toHaveBeenCalledTimes(1);
+    expect(mockCloseNativeHandle).toHaveBeenCalledTimes(1);
+    expect(mockCloseNativeHandle).toHaveBeenCalledWith(handleBuf);
+    // importSharedTexture holds its own reference (retain / DuplicateHandle),
+    // so the close must come after the import call.
+    const [importOrder] = mockImportSharedTexture.mock.invocationCallOrder;
+    const [closeOrder] = mockCloseNativeHandle.mock.invocationCallOrder;
+    expect(closeOrder).toBeGreaterThan(importOrder ?? Number.POSITIVE_INFINITY);
+    expect(mockSendSharedTexture).toHaveBeenCalledTimes(1);
+
+    bridge.dispose();
+  });
 
   it("releases the native handle when target webContents is destroyed", async () => {
     const errorHandler = vi.fn();

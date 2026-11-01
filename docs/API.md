@@ -424,7 +424,7 @@ interface SharedTextureFrame {
 }
 ```
 
-Each `handle` is a fresh, owning native reference. Either hand it to `sharedTexture.importSharedTexture` (Electron takes ownership) or call `closeNativeHandle(handle)` — otherwise you leak an NT HANDLE / IOSurface per frame.
+Each `handle` is a fresh, owning native reference. Call `closeNativeHandle(handle)` exactly once for every handle — also after handing it to `sharedTexture.importSharedTexture`, which never takes ownership (it duplicates / retains its own reference) — otherwise you leak an NT HANDLE / IOSurface retain per frame.
 
 ### `closeNativeHandle(handle)`
 
@@ -432,7 +432,7 @@ Each `handle` is a fresh, owning native reference. Either hand it to `sharedText
 function closeNativeHandle(handle: Buffer): void;
 ```
 
-Releases a native shared-texture handle (NT HANDLE on Windows, `IOSurfaceRef` on macOS) that was minted by `receiveSharedTexture()` but never consumed by Electron's `importSharedTexture`. Only call this for handles you have **not** forwarded to Electron; Electron releases handles it has taken ownership of on its own.
+Releases your reference on a native shared-texture handle (NT HANDLE on Windows, `IOSurfaceRef` on macOS) minted by `receiveSharedTexture()`. Call it exactly once per handle, whether or not you imported it: Electron's `importSharedTexture` keeps its own duplicated / retained reference, so closing right after the import call returns (success or throw) is safe. Calling it twice on the same handle is a double close / over-release.
 
 ### Resource Lifecycle
 

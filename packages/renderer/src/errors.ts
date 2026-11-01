@@ -12,7 +12,7 @@ export class FrameReceiveError extends Error {
   override name = "FrameReceiveError";
 }
 
-/** Electron's `importSharedTexture` threw before taking handle ownership. */
+/** Electron's `importSharedTexture` threw (the native handle is still closed by the bridge). */
 export class TextureImportError extends Error {
   override name = "TextureImportError";
 }

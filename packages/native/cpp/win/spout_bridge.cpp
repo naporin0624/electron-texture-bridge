@@ -523,11 +523,10 @@ int32_t spout_receiver_receive_rgba(void* handle,
 }
 
 // Receive a frame as a shared NT-handle texture (GPU-to-GPU, zero CPU copy).
-// On success, writes a new NT HANDLE into *out_nt_handle that the caller is
-// responsible for passing to Electron's sharedTexture.importSharedTexture().
-// Electron takes ownership of the handle and will close it when the imported
-// texture is released. DO NOT close the handle yourself after a successful
-// return.
+// On success, writes a new NT HANDLE into *out_nt_handle that the caller
+// owns and must close exactly once via native_close_shared_handle — also
+// after passing it to Electron's sharedTexture.importSharedTexture(), which
+// DuplicateHandle()s its own copy instead of adopting this one.
 //
 // Return codes:
 //   0 = frame received successfully
@@ -591,9 +590,9 @@ int32_t spout_receiver_receive_shared_texture(void* handle,
     return 0;
 }
 
-// Close a raw NT HANDLE minted by spout_receiver_receive_shared_texture but
-// never consumed by Electron's importSharedTexture. Use when the caller
-// decides not to import the handle (e.g. target destroyed, import threw).
+// Close a raw NT HANDLE minted by spout_receiver_receive_shared_texture.
+// Call exactly once per handle: after Electron's importSharedTexture returns
+// (Electron duplicates its own copy), or instead of importing it.
 // Returns 0 on success, -1 if handle is invalid.
 int32_t native_close_shared_handle(uintptr_t raw_handle) {
     if (raw_handle == 0) return -1;

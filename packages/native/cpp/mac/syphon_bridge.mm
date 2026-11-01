@@ -817,9 +817,9 @@ int syphon_receiver_receive_shared_iosurface(SyphonReceiverHandle handle,
         }
 
         // Mint a fresh per-frame retain on top of the bridge-owned retain.
-        // The caller — Electron's importSharedTexture or
-        // native_close_shared_iosurface for the unconsumed path — balances
-        // exactly one CFRelease against this CFRetain.
+        // The caller balances exactly one CFRelease against this CFRetain via
+        // native_close_shared_iosurface — imported or not, since Electron's
+        // importSharedTexture takes its own retain.
         CFRetain(bridge->sharedStagingIOSurface);
 
         *out_iosurface = (void*)bridge->sharedStagingIOSurface;

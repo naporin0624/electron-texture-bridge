@@ -11,8 +11,9 @@ pub struct Receiver {
 /// Metadata + raw NT handle for a Spout frame received as a shared GPU texture.
 ///
 /// `nt_handle` is a freshly minted kernel handle. Ownership is transferred to
-/// the caller: either pass it to Electron's `sharedTexture.importSharedTexture`
-/// (which will close it on release) or close it manually with `CloseHandle`.
+/// the caller, who must close it exactly once (via `close_shared_handle`) —
+/// also after passing it to Electron's `sharedTexture.importSharedTexture`,
+/// which `DuplicateHandle`s its own copy instead of adopting this one.
 pub struct SharedTextureHandleInfo {
     pub nt_handle: u64,
     pub width: u32,
@@ -109,8 +110,9 @@ impl Receiver {
     /// Receive a frame as a GPU-shared NT-handle texture (zero CPU readback).
     ///
     /// Returns `Ok(Some(info))` on success. The caller owns `info.nt_handle`
-    /// and must either pass it to Electron's `importSharedTexture` or close
-    /// it explicitly to avoid leaking a kernel handle.
+    /// and must close it exactly once, whether or not it was passed to
+    /// Electron's `importSharedTexture` (which duplicates its own copy), to
+    /// avoid leaking a kernel handle.
     pub fn receive_shared_texture(&self) -> Result<Option<SharedTextureHandleInfo>, String> {
         let handle = match self.handle {
             Some(h) => h,

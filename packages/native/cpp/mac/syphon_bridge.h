@@ -81,8 +81,9 @@ uint32_t syphon_receiver_get_height(SyphonReceiverHandle handle);
 // On success the frame is blitted into a per-receiver staging IOSurface-backed
 // MTLTexture and a CFRetained IOSurfaceRef of that staging texture is written
 // to *out_iosurface. The staging IOSurface is owned by this bridge — we hand
-// out a fresh retain per frame so Electron's importSharedTexture (or
-// native_close_shared_iosurface for unconsumed handles) can balance it. This
+// out a fresh retain per frame that the caller balances with exactly one
+// native_close_shared_iosurface — also after Electron's importSharedTexture,
+// which takes its own retain instead of adopting this one. This
 // mirrors the Windows receiver's per-frame DuplicateHandle pattern: callers
 // never see Syphon's pool-recycled texture directly.
 //
@@ -133,9 +134,9 @@ void syphon_convert_bgra_to_rgba(const uint8_t* src, uint8_t* dst, uint32_t pixe
 //   Unknown formats                        → MTLPixelFormatBGRA8Unorm (80, default)
 uint64_t syphon_map_pixel_format(uint32_t iosurface_pixel_format);
 
-// Release a raw IOSurfaceRef minted by syphon_receiver_receive_shared_iosurface
-// but never consumed by Electron's importSharedTexture. Use when the caller
-// decides not to import the surface (e.g. target destroyed, import threw).
+// Release a raw IOSurfaceRef minted by syphon_receiver_receive_shared_iosurface.
+// Call exactly once per surface: after Electron's importSharedTexture returns
+// (Electron retains its own reference), or instead of importing it.
 // Returns 0 on success, -1 if the pointer is null.
 int32_t native_close_shared_iosurface(uintptr_t raw_ptr);
 

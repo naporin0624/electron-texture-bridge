@@ -26,11 +26,17 @@ import { FpsCounter } from "./fps-counter";
 import { toError } from "./to-error";
 
 /**
- * Safely release a native shared-texture handle that was minted by the native
- * receiver but never consumed by Electron's `importSharedTexture`. Any throw
- * here would break the bridge poll loop, so we log and swallow.
+ * Safely release the caller's reference on a native shared-texture handle
+ * minted by the native receiver (`receiveSharedTexture` / `onSharedTexture`).
+ *
+ * Every such handle must be released exactly once, whether or not it was
+ * imported: Electron's `importSharedTexture` never takes ownership — it
+ * `DuplicateHandle`s the NT handle (Windows) or retains the IOSurface (macOS)
+ * into its own reference — so releasing right after the import call returns
+ * is safe. Any throw here would break the bridge poll loop, so we log and
+ * swallow.
  */
-const releaseUnconsumedHandle = (handle: Buffer): void => {
+const releaseNativeHandle = (handle: Buffer): void => {
   try {
     closeNativeHandle(handle);
   } catch (releaseErr) {
@@ -331,8 +337,8 @@ class SharedTextureReceiverBridgeImpl extends EventEmitter implements SharedText
     UnsupportedPixelFormatError | TextureImportError | TextureDeliveryError
   > {
     if (this.target.isDestroyed()) {
-      // Target is gone — handle was minted but Electron will never consume it.
-      releaseUnconsumedHandle(frame.handle);
+      // Target is gone — the handle is never imported; release it here.
+      releaseNativeHandle(frame.handle);
       return okAsync("skipped");
     }
 
@@ -343,18 +349,22 @@ class SharedTextureReceiverBridgeImpl extends EventEmitter implements SharedText
   }
 
   /**
-   * Validate the frame's pixel format and import it into Electron. On any
-   * failure the unconsumed native handle is released here (importSharedTexture
-   * never took ownership — without this we leak a per-frame NT HANDLE /
-   * IOSurface) via `orTee`, which taps the `Err` side and passes it through
-   * unchanged; the typed error still propagates to `_tick`'s single `.match`.
+   * Validate the frame's pixel format and import it into Electron, then
+   * release the native handle on BOTH outcomes. `importSharedTexture` never
+   * takes ownership — it holds its own duplicated NT HANDLE / retained
+   * IOSurface — so the receiver's reference must be released exactly once
+   * after the import attempt, success or failure; skipping it leaks one NT
+   * HANDLE / IOSurface retain per frame. `andTee` / `orTee` tap each side and
+   * pass it through unchanged; exactly one of them runs, and the typed error
+   * still propagates to the single `.match` consumer.
    */
   private _prepare(
     frame: SharedTextureFrame,
   ): Result<Electron.SharedTextureImported, UnsupportedPixelFormatError | TextureImportError> {
     return this._validate(frame)
       .andThen((textureInfo) => safeImportSharedTexture(textureInfo))
-      .orTee(() => releaseUnconsumedHandle(frame.handle));
+      .andTee(() => releaseNativeHandle(frame.handle))
+      .orTee(() => releaseNativeHandle(frame.handle));
   }
 
   /** Reject unknown pixel formats; wrap the raw handle for Electron. */
