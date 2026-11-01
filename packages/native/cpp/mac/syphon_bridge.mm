@@ -12,11 +12,85 @@
 // Syphon Metal Server のヘッダー（framework 内）
 // SyphonMetalServer は Syphon v5+ で利用可能
 
+// In-flight publish tracking for the sender. Syphon's publishFrameTexture adds
+// its own completed handler that runs -[SyphonServerBase publish] →
+// -[SyphonServerConnectionManager publishNewFrame] (a dispatch_sync on the
+// manager's queue) on a Metal completion thread. -[SyphonMetalServer stop]
+// releases that manager, so stopping while the handler is still running
+// crashes (SIGSEGV in publishNewFrame, or SIGTRAP "Premature release of a
+// locked queue"). syphon_bridge_destroy therefore waits for inFlight to drain
+// before stopping. Completion handlers capture this state by shared_ptr,
+// never the bridge, so a handler that outlives destroy only touches live
+// memory. Every field below `mutex` is guarded by it.
+struct SenderState {
+    std::mutex              mutex;
+    std::condition_variable idle;
+    bool                    shuttingDown = false;
+    int                     inFlight = 0; // committed, our handler not yet finished
+};
+
 struct SyphonBridge {
     id<MTLDevice>       device;
     id<MTLCommandQueue> commandQueue;
     SyphonMetalServer*  server;
+    std::shared_ptr<SenderState> state = std::make_shared<SenderState>();
 };
+
+// Returned by the send functions once syphon_bridge_destroy has started.
+static const int kSenderShuttingDown = -2;
+
+// Upper bound on how long destroy waits for in-flight publishes (matches the
+// receiver push path's drain cap).
+static const auto kSenderDrainTimeout = std::chrono::seconds(2);
+
+// Publishes `texture` to Syphon and commits without waiting. Counts the
+// command buffer as in flight until our completed handler finishes.
+//
+// Our handler is registered after the one publishFrameTexture adds, so its
+// decrement covers Syphon's handler too: Metal runs a command buffer's
+// completed handlers one after another, in registration order, on the same
+// thread. Apple's documentation does not state this ordering; it was verified
+// empirically (10,000 command buffers, a sleeping first handler, zero
+// out-of-order or cross-thread runs). The fix rests on this; if a future Metal
+// breaks it, the mac::tests::sender_drop_right_after_publish_does_not_crash
+// regression test crashes again.
+static int publish_and_commit(SyphonBridge* bridge,
+                              id<MTLTexture> texture,
+                              uint32_t width,
+                              uint32_t height,
+                              NSString* label) {
+    std::shared_ptr<SenderState> state = bridge->state;
+    {
+        // Check and increment under one lock so destroy can never observe
+        // inFlight == 0 between them.
+        std::lock_guard<std::mutex> lock(state->mutex);
+        if (state->shuttingDown) return kSenderShuttingDown;
+        state->inFlight++;
+    }
+
+    id<MTLCommandBuffer> cmdBuf = [bridge->commandQueue commandBuffer];
+    if (!cmdBuf) {
+        // No handler will ever run for this publish, so undo the count.
+        std::lock_guard<std::mutex> lock(state->mutex);
+        state->inFlight--;
+        state->idle.notify_all();
+        return -1;
+    }
+    [bridge->server publishFrameTexture:texture
+                        onCommandBuffer:cmdBuf
+                            imageRegion:NSMakeRect(0, 0, width, height)
+                                flipped:YES];
+    [cmdBuf addCompletedHandler:^(id<MTLCommandBuffer> completed) {
+        if (completed.error) {
+            NSLog(@"[SyphonBridge] ERROR: publish (%@) cmdBuf error: %@", label, completed.error);
+        }
+        std::lock_guard<std::mutex> lock(state->mutex);
+        state->inFlight--;
+        state->idle.notify_all();
+    }];
+    [cmdBuf commit];
+    return 0;
+}
 
 extern "C" {
 
@@ -53,8 +127,33 @@ void syphon_bridge_destroy(SyphonBridgeHandle handle) {
     if (!handle) return;
     @autoreleasepool {
         auto* bridge = static_cast<SyphonBridge*>(handle);
-        [bridge->server stop];
-        bridge->server      = nil;
+        std::shared_ptr<SenderState> state = bridge->state;
+
+        // 1. Reject further sends, then wait for Syphon's completed handlers
+        //    of already-committed publishes to finish (see SenderState).
+        std::unique_lock<std::mutex> lock(state->mutex);
+        state->shuttingDown = true;
+        const bool drained = state->idle.wait_for(
+            lock, kSenderDrainTimeout, [&state] { return state->inFlight == 0; });
+        const int stillInFlight = state->inFlight;
+        lock.unlock();
+
+        if (!drained) {
+            // A wedged GPU kept a publish in flight. Stopping (or releasing)
+            // the server now would free the connection manager under
+            // Syphon's pending handler, a use-after-free crash. Leaking the
+            // server is the lesser evil: take an extra +1 that is never
+            // balanced so neither `server = nil` nor `delete bridge` (ARC
+            // releases the member) can deallocate it.
+            NSLog(@"[SyphonBridge] destroy: %d publish command buffer(s) still in flight after 2s; "
+                  @"leaking the Syphon server instead of stopping it",
+                  stillInFlight);
+            (void)CFBridgingRetain(bridge->server);
+        } else {
+            [bridge->server stop];
+        }
+
+        bridge->server       = nil;
         bridge->commandQueue = nil;
         bridge->device       = nil;
         delete bridge;
@@ -91,21 +190,8 @@ int syphon_bridge_send(SyphonBridgeHandle handle,
 
         if (!texture) return -1;
 
-        // Syphon にパブリッシュ（GPU→GPU, zero-copy）
-        // Publish to Syphon
-        id<MTLCommandBuffer> cmdBuf = [bridge->commandQueue commandBuffer];
-        [bridge->server publishFrameTexture:texture
-                            onCommandBuffer:cmdBuf
-                                imageRegion:NSMakeRect(0, 0, width, height)
-                                    flipped:YES];
-        [cmdBuf addCompletedHandler:^(id<MTLCommandBuffer> completed) {
-            if (completed.error) {
-                NSLog(@"[SyphonBridge] ERROR: publish (IOSurface id) cmdBuf error: %@", completed.error);
-            }
-        }];
-        [cmdBuf commit];
-
-        return 0;
+        // Publish to Syphon (GPU→GPU, zero-copy)
+        return publish_and_commit(bridge, texture, width, height, @"IOSurface id");
     }
 }
 
@@ -140,21 +226,8 @@ int syphon_bridge_send_surface(SyphonBridgeHandle handle,
 
         if (!texture) return -1;
 
-        // Publish to Syphon（GPU→GPU, zero-copy）
-        // Publish to Syphon
-        id<MTLCommandBuffer> cmdBuf = [bridge->commandQueue commandBuffer];
-        [bridge->server publishFrameTexture:texture
-                            onCommandBuffer:cmdBuf
-                                imageRegion:NSMakeRect(0, 0, width, height)
-                                    flipped:YES];
-        [cmdBuf addCompletedHandler:^(id<MTLCommandBuffer> completed) {
-            if (completed.error) {
-                NSLog(@"[SyphonBridge] ERROR: publish (IOSurface ptr) cmdBuf error: %@", completed.error);
-            }
-        }];
-        [cmdBuf commit];
-
-        return 0;
+        // Publish to Syphon (GPU→GPU, zero-copy)
+        return publish_and_commit(bridge, texture, width, height, @"IOSurface ptr");
     }
 }
 
@@ -219,20 +292,8 @@ int syphon_bridge_send_rgba(SyphonBridgeHandle handle,
             return -1;
         }
 
-        // Publish to Syphon
-        id<MTLCommandBuffer> cmdBuf = [bridge->commandQueue commandBuffer];
-        [bridge->server publishFrameTexture:texture
-                            onCommandBuffer:cmdBuf
-                                imageRegion:NSMakeRect(0, 0, width, height)
-                                    flipped:YES];
-        [cmdBuf addCompletedHandler:^(id<MTLCommandBuffer> completed) {
-            if (completed.error) {
-                NSLog(@"[SyphonBridge] ERROR: publish (RGBA buffer) cmdBuf error: %@", completed.error);
-            }
-        }];
-        [cmdBuf commit];
-
-        return 0;
+        // Publish to Syphon (GPU→GPU, zero-copy)
+        return publish_and_commit(bridge, texture, width, height, @"RGBA buffer");
     }
 }
 
