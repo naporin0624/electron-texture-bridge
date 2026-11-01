@@ -7,9 +7,13 @@
 // failure, timeout, SIGINT/SIGTERM). Exit 0 = pass, 1 = fail.
 //
 // Each page is raised with Page.bringToFront and must report
-// visibilityState=visible with rAF ticking before it is judged: on macOS an
-// occluded window runs no rAF, which stalls the multiviewer's rAF draw loop
-// (arrival > 0, draw = 0) regardless of whether frames are flowing.
+// visibilityState=visible with rAF ticking before it is judged. Then, with
+// frames flowing, a full-display window is opened on top of it and the page
+// must STILL report visible + rAF ticking + frames drawn: on macOS an occluded
+// window otherwise turns "hidden" and runs no rAF, stalling the multiviewer's
+// rAF draw loop (arrival > 0, draw = 0). The app opts its monitor windows out
+// with `backgroundThrottling: false`; the e2e launches Electron WITHOUT any
+// Chromium backgrounding switches so these checks prove that fix.
 //
 // Platform: macOS only for now — the receiver path and the multiviewer's
 // syphon deck need Syphon. On other platforms it prints a skip and exits 0.
@@ -30,6 +34,7 @@ import { killApp, killAppSync, launchApp, pickFreePort, type AppProcess } from "
 import { connectCDP, listPageTargets, type CDPSession, type PageTarget } from "./cdp.mts";
 import {
   PageReloadedError,
+  RAF_PROBE,
   runMultiviewer,
   runReceiver,
   type Check,
@@ -162,17 +167,6 @@ const waitSettled = async (current: AppProcess, session: CDPSession): Promise<vo
 };
 
 type Visibility = { visible: boolean; state: string; raf: number };
-
-// rAF ticks in one second + visibilityState. An occluded/hidden window on
-// macOS reports "hidden" and runs no rAF, so the multiviewer's rAF draw loop
-// stalls (arrival > 0 but draw = 0) — that is a window-stacking artefact,
-// not a pipeline failure, so it is fixed up front and reported separately.
-const RAF_PROBE = `new Promise((resolve) => {
-  let n = 0;
-  const tick = () => { n++; requestAnimationFrame(tick); };
-  requestAnimationFrame(tick);
-  setTimeout(() => resolve({ state: document.visibilityState, raf: n }), 1000);
-})`;
 
 const ensureVisible = async (session: CDPSession): Promise<Visibility> => {
   const deadline = Date.now() + VISIBLE_TIMEOUT_MS;

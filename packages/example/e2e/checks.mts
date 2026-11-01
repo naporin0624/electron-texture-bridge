@@ -19,7 +19,39 @@ export class PageReloadedError extends Error {
   }
 }
 
+/**
+ * rAF ticks in one second + visibilityState. An occluded/hidden window on
+ * macOS reports "hidden" and runs no rAF unless background throttling is
+ * disabled for it, so the multiviewer's rAF draw loop would stall
+ * (arrival > 0 but draw = 0).
+ */
+export const RAF_PROBE = `new Promise((resolve) => {
+  let n = 0;
+  const tick = () => { n++; requestAnimationFrame(tick); };
+  requestAnimationFrame(tick);
+  setTimeout(() => resolve({ state: document.visibilityState, raf: n }), 1000);
+})`;
+
+// Covering window: a plain opaque popup spanning the whole available area of
+// the display the page is on, so macOS treats the page's window as occluded
+// (fully covered). Opened from the page itself so no main-process hook is
+// needed; the handle is kept on window.__e2eCover so it can be closed.
+const OPEN_COVER_EXPR = `(() => {
+  const s = window.screen;
+  const features = "left=" + s.availLeft + ",top=" + s.availTop +
+    ",width=" + s.availWidth + ",height=" + s.availHeight;
+  window.__e2eCover = window.open("about:blank", "e2e-cover", features);
+  return window.__e2eCover !== null;
+})()`;
+const CLOSE_COVER_EXPR = `(() => {
+  window.__e2eCover?.close();
+  window.__e2eCover = undefined;
+})()`;
+const COVER_SETTLE_MS = 2500;
+const DRAW_COUNT_WINDOW_MS = 1000;
+
 type LitSample = { width: number; height: number; lit: number };
+type CoveredProbe = { state: string; raf: number };
 type DeckReading = { status: string; arrival: number; draw: number; lit: number };
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
@@ -82,6 +114,43 @@ const pollUntil = async <T extends unknown>(
   }
   return last;
 };
+
+// Count ctx.drawImage calls on a canvas over a window, by shadowing the
+// method on that context instance (the page's draw code holds the same
+// context object, since getContext("2d") returns it again).
+const drawCountExpr = (selector: string, windowMs: number): string => `new Promise((resolve) => {
+  const c = document.querySelector(${JSON.stringify(selector)});
+  const ctx = c instanceof HTMLCanvasElement ? c.getContext("2d") : null;
+  if (!ctx) { resolve(-1); return; }
+  let n = 0;
+  const original = ctx.drawImage;
+  ctx.drawImage = (...args) => { n++; return original.apply(ctx, args); };
+  setTimeout(() => { delete ctx.drawImage; resolve(n); }, ${windowMs});
+})`;
+
+type Covered<T> = { opened: boolean; probe: CoveredProbe; reading: T };
+
+/** Open a full-display window over the page, let it settle, read, always close it. */
+const whileCovered = async <T extends unknown>(
+  session: CDPSession,
+  read: () => Promise<T>,
+): Promise<Covered<T>> => {
+  const opened = await session.evaluate<boolean>(OPEN_COVER_EXPR);
+  try {
+    await sleep(COVER_SETTLE_MS);
+    const probe = await session.evaluate<CoveredProbe>(RAF_PROBE);
+    const reading = await read();
+    return { opened, probe, reading };
+  } finally {
+    await session.evaluate(CLOSE_COVER_EXPR).catch(() => undefined);
+  }
+};
+
+const coveredVisibleCheck = (label: string, covered: Covered<unknown>): Check => ({
+  name: `${label} covered: still visible (rAF running)`,
+  pass: covered.opened && covered.probe.state === "visible" && covered.probe.raf > 0,
+  detail: `cover opened=${covered.opened} visibilityState=${covered.probe.state} rAF/s=${covered.probe.raf}`,
+});
 
 /** Click Refresh until every wanted option is listed (own Syphon server may announce late). */
 const waitForOptions = async (
@@ -157,6 +226,22 @@ export const runMultiviewer = async (session: CDPSession, t: Thresholds): Promis
     deckCheck(slot, MULTIVIEWER_PLAN[slot] ?? "?", reading, t),
   );
 
+  // With all decks drawing, cover the window and require the rAF draw loop to
+  // keep drawing every deck. readAllDecks reads the 1s draw-fps window, which
+  // by then lies entirely inside the covered period.
+  const covered = await whileCovered(session, () =>
+    readAllDecks(session, MULTIVIEWER_PLAN.length),
+  );
+  assertNoReload(session, baseline);
+  const coveredChecks: Check[] = [
+    coveredVisibleCheck("multiviewer", covered),
+    ...covered.reading.map((reading, slot) => ({
+      name: `multiviewer covered: deck ${slot} still drawing`,
+      pass: reading.draw > t.minFps,
+      detail: `arrival=${reading.arrival} draw=${reading.draw} | "${reading.status}"`,
+    })),
+  ];
+
   const deck0WasLit = readings[0] !== undefined && deckHealthy(readings[0], t);
   await session.evaluate(clickExpr("disconnect-0"));
   const afterDisconnect = await pollUntil(
@@ -174,6 +259,7 @@ export const runMultiviewer = async (session: CDPSession, t: Thresholds): Promis
   return [
     { name: "multiviewer sources listed", pass: true, detail: MULTIVIEWER_PLAN.join(", ") },
     ...deckChecks,
+    ...coveredChecks,
     {
       name: "multiviewer deck 0 disconnect clears",
       // Only meaningful if deck 0 was actually lit before the disconnect.
@@ -219,6 +305,15 @@ export const runReceiver = async (session: CDPSession, t: Thresholds): Promise<C
   await sleep(RECEIVER_FPS_WINDOW_MS);
   const reading = await readReceiver(session);
   assertNoReload(session, baseline);
+  // The receiver draws from onFrame (not rAF), so count actual drawImage calls
+  // while covered rather than trusting the last render-fps text. Note: unlike
+  // the multiviewer, this window was not observed to report "hidden" under the
+  // cover even without backgroundThrottling:false, so this step guards against
+  // regressions but does not by itself prove the receiver's opt-out.
+  const covered = await whileCovered(session, () =>
+    session.evaluate<number>(drawCountExpr("#canvas", DRAW_COUNT_WINDOW_MS)),
+  );
+  assertNoReload(session, baseline);
   await session.evaluate(clickExpr("disconnectBtn"));
 
   return [
@@ -227,6 +322,12 @@ export const runReceiver = async (session: CDPSession, t: Thresholds): Promise<C
       name: `receiver (${OWN_SENDER})`,
       pass: reading.renderFps > t.minFps && reading.lit > t.minLit,
       detail: `render=${reading.renderFps} lit=${reading.lit} | "${reading.info}"`,
+    },
+    coveredVisibleCheck("receiver", covered),
+    {
+      name: "receiver covered: still drawing",
+      pass: covered.reading > t.minFps,
+      detail: `drawImage calls in ${DRAW_COUNT_WINDOW_MS}ms=${covered.reading}`,
     },
   ];
 };
