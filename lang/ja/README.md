@@ -334,7 +334,7 @@ pnpm --filter @napolab/texture-bridge-example run build:win
 | [docs/ja/TROUBLESHOOTING.md](../../docs/ja/TROUBLESHOOTING.md) | 黒画面、paint イベントが発火しない、フリーズ、プラットフォームごとのレシーバー問題 |
 | [docs/ja/MIGRATION.md](../../docs/ja/MIGRATION.md) | Electron 42 / OSR デバイススケール、同期的な dispose（v0.14+）、明示的な破棄（v0.6+） |
 | [docs/ja/DEVELOPMENT.md](../../docs/ja/DEVELOPMENT.md) | リポジトリ構成と CI |
-| [specs/ARCHITECTURE.md](../../specs/ARCHITECTURE.md) | 詳細な内部アーキテクチャ |
+| [docs/ja/ARCHITECTURE.md](../../docs/ja/ARCHITECTURE.md) | 現在のアーキテクチャの Mermaid 図: パッケージとプロセスの対応、送信経路、受信経路とハンドルの所有権、`forwardFrames` のファンアウト、ネイティブのレイヤーとスレッド |
 
 ## ライセンス
 

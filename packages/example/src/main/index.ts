@@ -147,9 +147,12 @@ const bootstrap = async (): Promise<void> => {
   // standalone Syphon/Spout receive path, which the multiviewer's own
   // "syphon" slot route already exercises.
   if (!multiviewerOnly) {
-    // We drive the receiver via `createSharedTextureReceiver`, which polls
-    // `receiveSharedTexture` (NT HANDLE / IOSurface) and delivers the imported
-    // texture to the receiver window's renderer via Electron's
+    // We drive the receiver via `createSharedTextureReceiver`. On macOS and
+    // Windows it defaults to push mode: a native worker thread hands each
+    // frame (NT HANDLE / IOSurface) to JS via `onSharedTexture`. Elsewhere, or
+    // if the push subscription fails, it polls `receiveSharedTexture` every
+    // `pollIntervalMs`. Either way the imported texture is delivered to the
+    // receiver window's renderer via Electron's
     // `sharedTexture.sendSharedTexture`. The renderer consumes each frame as a
     // `VideoFrame` and draws it via `drawImage`, which hits the GPU path
     // without any CPU readback or IPC pixel copy.
