@@ -3,7 +3,7 @@
 受信経路は 2 つあり、それぞれ解決する問題が異なります。
 
 - **`TextureReceiver.receiveFrame()` / `createTextureReceiver()`** — RGBA リードバック。ネイティブ側が GPU→CPU ブリット（D3D11 ステージング / Metal ブリット）を実行し、IPC を 1 回経由して `ArrayBuffer` を渡します。1080p 1 フレームあたり約 8 MB が IPC 経由でコピーされます。JavaScript 側で実際にピクセルデータが欲しい場合（解析、画像エクスポート、独自のカラーパイプラインなど）に使ってください。
-- **`TextureReceiver.receiveSharedTexture()` / `createSharedTextureReceiver()` / `consumeSharedTexture()`** — ゼロコピー GPU 配信。ネイティブ側がフレームごとにプラットフォームネイティブな共有ハンドル（Windows では DXGI NT ハンドル、macOS では IOSurface ポインタ）を発行し、Electron の `sharedTexture.importSharedTexture` + `sendSharedTexture` のペアを介してレンダラーへ `VideoFrame` として渡します。CPU リードバックも `ArrayBuffer` の IPC コピーもありません。`ctx.drawImage(videoFrame, 0, 0)` は GPU 上で完結し、`GPUDevice.importExternalTexture({ source: videoFrame })` も同じテクスチャをコピーなしで WebGPU に渡します。受信した映像を表示するだけ、あるいは GPU 上で処理したいだけの場合に使ってください。
+- **`TextureReceiver.receiveSharedTexture()` / `createSharedTextureReceiver()` / `bindSharedTextureReceiver()`** — ゼロコピー GPU 配信。ネイティブ側がフレームごとにプラットフォームネイティブな共有ハンドル（Windows では DXGI NT ハンドル、macOS では IOSurface ポインタ）を発行し、Electron の `sharedTexture.importSharedTexture` + `sendSharedTexture` のペアを介してレンダラーへ `VideoFrame` として渡します。CPU リードバックも `ArrayBuffer` の IPC コピーもありません。`ctx.drawImage(videoFrame, 0, 0)` は GPU 上で完結し、`GPUDevice.importExternalTexture({ source: videoFrame })` も同じテクスチャをコピーなしで WebGPU に渡します。受信した映像を表示するだけ、あるいは GPU 上で処理したいだけの場合に使ってください。
 
 そのフレームで何をしたいかに応じて、どちらか一方を選んでください。
 
@@ -56,24 +56,23 @@ app.whenReady().then(() => {
 - **macOS:** `IOSurfaceRef` がリング自身の参照より多く retain されているか、`IOSurfaceIsInUse` が使用中を返す間、そのスロットは使いません。Electron の import は `CFGetRetainCount` に現れないため、実際にレンダラーがまだ参照しているスロットを守っているのは `IOSurfaceIsInUse` です。3 スロットすべてが使用中ならフレームはネイティブ側で破棄されます（"all 3 ring slots still held downstream" とログに出ます）。
 - **Windows:** スロットが使用中とみなされるのは、そのスロット用に渡した NT ハンドルがまだ開いている間だけです（`CompareObjectHandles`）。ブリッジは import 直後にハンドルを close するので、この判定は実質的に常に「空き」となり、リングは 3 スロットの単純なラウンドロビンになります。レンダラーがまだ参照しているスロットは検出できません。それでも、poll 経路が毎フレーム使い回す単一のステージングテクスチャよりは確実に良くなります。`CompareObjectHandles` のない Windows 10 1607 より前の環境では、一度渡したスロットがずっと使用中扱いになり、3 フレームで push 配信が止まります。その環境では `mode: "poll"` を使ってください。
 
-## レンダラープロセス: `installSharedTextureReceiver` + `consumeSharedTexture`
+## レンダラープロセス: `bindSharedTextureReceiver` + `receiver.consume`
 
 ```typescript
 // renderer process (or preload with nodeIntegration: true, contextIsolation: false)
-import {
-  installSharedTextureReceiver,
-  consumeSharedTexture,
-} from "@napolab/texture-bridge-renderer/client";
+import { sharedTexture } from "electron";
+import { bindSharedTextureReceiver } from "@napolab/texture-bridge-renderer/client";
 
 // Call once at startup. Binds Electron's single
-// sharedTexture.setSharedTextureReceiver slot to an internal pool so multiple
-// consumers can coexist. Idempotent.
-installSharedTextureReceiver();
+// sharedTexture.setSharedTextureReceiver slot to a pool so multiple consumers
+// can coexist. Binding the same sharedTexture twice (without dispose) throws
+// SharedTextureReceiverAlreadyBoundError.
+const receiver = bindSharedTextureReceiver(sharedTexture);
 
 const canvas = document.getElementById("canvas") as HTMLCanvasElement;
 const ctx = canvas.getContext("2d")!;
 
-const registration = consumeSharedTexture({
+const registration = receiver.consume({
   onFrame: ({ textureId, videoFrame }) => {
     if (canvas.width !== videoFrame.displayWidth) canvas.width = videoFrame.displayWidth;
     if (canvas.height !== videoFrame.displayHeight) canvas.height = videoFrame.displayHeight;
@@ -84,9 +83,12 @@ const registration = consumeSharedTexture({
 });
 
 // registration.dispose();  // optional — removes this consumer from the pool
+// receiver.dispose();      // optional — tears the binding down (idempotent)
 ```
 
 `videoFrame` は標準の Web `VideoFrame` です。WebGPU で使う場合は `drawImage` の代わりに `device.importExternalTexture({ source: videoFrame })` に渡してください — こちらの経路もゼロコピーです。`videoFrame.close()` を自分で呼ぶ**必要はありません**。ハンドラーが返す Promise が解決した後、consumer 側のラッパーが close します。
+
+`receiver.dispose()` はすべてのコンシューマーを破棄し、同じ `sharedTexture` を再びバインドできる状態に戻します。その後に `receiver.consume()` を呼ぶと `SharedTextureReceiverDisposedError` が投げられます。Electron にはレシーバースロットを解除する手段がないため、設置済みのコールバックはその後に届いたフレームも引き続き受け取って release します。詳しくは [API リファレンス](API.md#bindsharedtexturereceiversharedtexturerendererclient-から) を参照してください。
 
 ## オプション: `TextureReceiver.receiveSharedTexture()` を直接ポーリングする
 
@@ -137,5 +139,5 @@ for (const s of listSenders()) {
 
 Electron の `sharedTexture` モジュールは、`electron` を実行時に解決できる main / renderer プロセスからのみアクセスできます。`@napolab/texture-bridge-renderer/client` を Vite 駆動のレンダラーから直接 import すると、dev のプリバンドル時に失敗することがあります（`path.join is not a function`）。これは Vite が `electron` の CJS モジュールをプリバンドルできないためです。回避方法は 2 つあります。
 
-1. **単純なケースでの推奨方法:** `installSharedTextureReceiver()` と `consumeSharedTexture()` を **preload スクリプト**（electron-vite / electron-builder が `externalizeDepsPlugin` でバンドルする）に置き、レシーバーウィンドウを `nodeIntegration: true, contextIsolation: false` で実行します。サンプルアプリはこの方式を採っています — [`packages/example/src/preload/receiver.ts`](../../packages/example/src/preload/receiver.ts) を参照してください。
+1. **単純なケースでの推奨方法:** `bindSharedTextureReceiver(sharedTexture)` と `receiver.consume()` を **preload スクリプト**（electron-vite / electron-builder が `externalizeDepsPlugin` でバンドルする）に置き、レシーバーウィンドウを `nodeIntegration: true, contextIsolation: false` で実行します。サンプルアプリはこの方式を採っています — [`packages/example/src/preload/receiver.ts`](../../packages/example/src/preload/receiver.ts) を参照してください。
 2. **コンテキスト分離を維持する場合:** consumer を preload 側でバインドし、各 `VideoFrame` を `window.postMessage(videoFrame, "*", [videoFrame])`（`VideoFrame` は transferable です）で分離された renderer world へ転送します。使用後は renderer 側で close してください。

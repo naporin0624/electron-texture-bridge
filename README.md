@@ -154,7 +154,7 @@ app.whenReady().then(() => {
 });
 ```
 
-That example uses the **RGBA readback** path. For the **zero-copy GPU** path (`createSharedTextureReceiver`, `consumeSharedTexture`, renderer context isolation), see **[docs/RECEIVING.md](docs/RECEIVING.md)**.
+That example uses the **RGBA readback** path. For the **zero-copy GPU** path (`createSharedTextureReceiver`, `bindSharedTextureReceiver`, renderer context isolation), see **[docs/RECEIVING.md](docs/RECEIVING.md)**.
 
 ## Which API should I use?
 
@@ -331,7 +331,7 @@ pnpm --filter @napolab/texture-bridge-example run build:win
 |----------|--------------|
 | [docs/INSTALLATION.md](docs/INSTALLATION.md) | Prerequisites, building from source, integrating into your app, packaging, verification |
 | [docs/SENDING.md](docs/SENDING.md) | Capturing external pages, `includeAlpha` transparency, the low-level core paint loop, Retina/DPI correctness, no-Electron sanity check, electron-vite (ESM) |
-| [docs/RECEIVING.md](docs/RECEIVING.md) | Both receive paths, `createSharedTextureReceiver`, `installSharedTextureReceiver` / `consumeSharedTexture`, handle ownership, renderer context isolation |
+| [docs/RECEIVING.md](docs/RECEIVING.md) | Both receive paths, `createSharedTextureReceiver`, `bindSharedTextureReceiver` / `receiver.consume`, handle ownership, renderer context isolation |
 | [docs/API.md](docs/API.md) | Full API reference for every exported symbol in all three packages |
 | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Black output, paint events not firing, freezing, receiver problems per platform |
 | [docs/MIGRATION.md](docs/MIGRATION.md) | Electron 42 / OSR device scale, synchronous dispose (v0.14+), explicit disposal (v0.6+) |

@@ -585,7 +585,7 @@ type SendResult = "delivered" | "skipped";
  * (`mode: "push"`, default on macOS / Windows) or polled every
  * `pollIntervalMs` (`mode: "poll"`) — and delivers each frame as a GPU-shared
  * texture to `options.target`'s renderer. The renderer
- * must register a handler via `consumeSharedTexture` from
+ * must register a handler via `bindSharedTextureReceiver(sharedTexture).consume()` from
  * `@napolab/texture-bridge-renderer/client`.
  *
  * @throws {TypeError} `pollIntervalMs` was passed and is not a positive

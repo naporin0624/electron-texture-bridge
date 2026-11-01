@@ -21,7 +21,7 @@ Three tiers, one decision rule: **who owns the offscreen window, and where do fr
 | Receive external Syphon/Spout as pixels in JS (analysis/export) | `createTextureReceiver({ senderName })` + `.start()` | `@napolab/texture-bridge-renderer` |
 | Raw RGBA push without Electron (sanity check / CI) | `sender.sendRgbaBuffer(buf, w, h)` | `@napolab/texture-bridge-core` |
 
-Any window that consumes forwarded or received shared-texture frames uses the same receiving pair: `installSharedTextureReceiver()` + `consumeSharedTexture(handlers)` from `@napolab/texture-bridge-renderer/client` (see receiving-shared-textures skill).
+Any window that consumes forwarded or received shared-texture frames uses the same receiving pair: `const receiver = bindSharedTextureReceiver(sharedTexture)` + `receiver.consume(handlers)` from `@napolab/texture-bridge-renderer/client` (see receiving-shared-textures skill).
 
 ## forwardFrames vs forwardSharedTexture
 
