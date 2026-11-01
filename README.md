@@ -336,7 +336,7 @@ pnpm --filter @napolab/texture-bridge-example run build:win
 | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Black output, paint events not firing, freezing, receiver problems per platform |
 | [docs/MIGRATION.md](docs/MIGRATION.md) | Electron 42 / OSR device scale, synchronous dispose (v0.14+), explicit disposal (v0.6+) |
 | [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | Repository layout and CI |
-| [specs/ARCHITECTURE.md](specs/ARCHITECTURE.md) | Detailed internal architecture |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Mermaid diagrams of the current architecture: package/process map, send path, receive path and handle ownership, `forwardFrames` fan-out, native layers and threads |
 
 ## License
 
