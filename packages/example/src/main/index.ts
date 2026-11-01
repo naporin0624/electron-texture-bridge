@@ -180,6 +180,13 @@ const bootstrap = async (): Promise<void> => {
         sandbox: false,
         nodeIntegration: true,
         contextIsolation: false,
+        // Monitor window: must keep presenting frames while another app covers
+        // it. On macOS an occluded window turns `document.visibilityState`
+        // "hidden" and Chromium throttles timers/rAF and frame swaps;
+        // disabling background throttling keeps it "visible" even when
+        // minimized, occluded or hidden (see Electron docs: BrowserWindow
+        // "Page visibility" and WebPreferences.backgroundThrottling).
+        backgroundThrottling: false,
       },
     });
 
@@ -275,6 +282,13 @@ const bootstrap = async (): Promise<void> => {
       sandbox: false,
       nodeIntegration: true,
       contextIsolation: false,
+      // Monitor window: the decks are drawn from a requestAnimationFrame loop,
+      // and on macOS a window fully covered by another app reports
+      // visibilityState "hidden" and stops rAF — frames would keep arriving
+      // but nothing would be drawn. Per-window opt-out keeps it "visible"
+      // (and rAF running) even when occluded; no global Chromium switch
+      // (`disable-backgrounding-occluded-windows`) is needed.
+      backgroundThrottling: false,
     },
   });
 
