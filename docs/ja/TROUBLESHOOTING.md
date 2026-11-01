@@ -33,7 +33,7 @@
 
 - **Electron 40 以上が必要です** — `sharedTexture.importSharedTexture` / `sendSharedTexture` / `setSharedTextureReceiver` モジュールを使用します。それより古い Electron では import 時点で例外を投げます。
 - **`listSenders()` に `<sender>_1` のような接尾辞が付く。** 同名の前回のセンダープロセスが正常終了せず、その共有メモリのディレクトリエントリが残っている状態です。実際のセンダーを起動（または再起動）してください — きれいな名前を再取得するか、次回の publisher サイクルで接尾辞付きのエントリが自然に消えます。
-- **対象ウィンドウが閉じた後のハンドルリーク。** `receiveSharedTexture()` を直接ポーリングする場合は、ハンドルを `sharedTexture.importSharedTexture` に渡さない全ての経路——「ターゲットが破棄済み」「未知のピクセルフォーマット」「このフレームを破棄すると決めた」を含む——で必ず `closeNativeHandle(frame.handle)` を呼んでください。`createSharedTextureReceiver` はこれを自動的に行います。
+- **フレームごとのハンドルリーク（NT HANDLE 数 / IOSurface のメモリが増え続ける）。** `receiveSharedTexture()` を直接ポーリングする場合は、**すべての**経路で `closeNativeHandle(frame.handle)` をちょうど 1 回呼んでください。`sharedTexture.importSharedTexture` が成功した後も対象です（`importSharedTexture` はハンドルの所有権を引き取らず、自前で複製 / retain した参照を持ちます）。「ターゲットが破棄済み」「未知のピクセルフォーマット」「このフレームを破棄すると決めた」の経路も同様です。`createSharedTextureReceiver` はこれを自動的に行います。
 - **Windows のステージングテクスチャ。** レシーバーはステージングテクスチャを `MISC_SHARED_NTHANDLE | MISC_SHARED`（キーミューテックスなし）で作成するため、consumer 側はフレームごとに `AcquireSync` を呼ぶ必要がありません — Electron が直接 import します。
 
 ## フリーズ / paint イベントが停止する

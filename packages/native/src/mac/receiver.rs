@@ -8,9 +8,10 @@ pub struct Receiver {
 /// Metadata + raw IOSurfaceRef pointer for a Syphon frame received as a shared
 /// GPU texture.
 ///
-/// `iosurface_ptr` is CFRetained. Ownership transfers to the caller: either
-/// pass to Electron's `importSharedTexture` (which CFReleases on release) or
-/// manually `CFRelease` it to avoid leaking.
+/// `iosurface_ptr` is CFRetained. Ownership transfers to the caller, who must
+/// `CFRelease` it exactly once (via `close_shared_iosurface`) — also after
+/// passing it to Electron's `importSharedTexture`, which takes its own retain
+/// instead of adopting this one.
 #[derive(Debug)]
 pub struct SharedIoSurfaceInfo {
     pub iosurface_ptr: u64,
@@ -174,8 +175,8 @@ impl Receiver {
     /// Receive the current frame as an IOSurfaceRef (zero-copy for GPU consumers).
     ///
     /// Returns `Ok(Some(info))` on success. The caller owns `info.iosurface_ptr`
-    /// and must either pass it to Electron's `importSharedTexture` or `CFRelease`
-    /// it directly.
+    /// and must `CFRelease` it exactly once, whether or not it was passed to
+    /// Electron's `importSharedTexture` (which retains its own reference).
     pub fn receive_shared_iosurface(&self) -> Result<Option<SharedIoSurfaceInfo>, String> {
         let handle = match self.handle {
             Some(h) => h,

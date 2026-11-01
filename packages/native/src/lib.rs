@@ -250,18 +250,16 @@ fn parse_senders_json(json: &str) -> std::result::Result<Vec<SenderInfo>, String
 /// `handle` is an 8-byte little-endian encoding of the platform-native shared
 /// resource descriptor:
 /// - Windows: an NT HANDLE (freshly minted for this frame via
-///   `IDXGIResource1::CreateSharedHandle`). Ownership transfers to the consumer;
-///   Electron will close it when the imported texture is released.
-/// - macOS: an `IOSurfaceRef` pointer (retained by this call, released when the
-///   imported texture is released by Electron).
+///   `DuplicateHandle`).
+/// - macOS: an `IOSurfaceRef` pointer (retained once by this call).
 ///
 /// **Ownership contract.** The handle is fresh per frame and is always owned by
-/// the caller. On a successful `sharedTexture.importSharedTexture` the imported
-/// texture takes ownership and frees the handle on its own `release()`. On any
-/// path that does *not* feed the handle into `importSharedTexture` — unknown
-/// pixelFormat, target WebContents destroyed, `importSharedTexture` threw — the
-/// caller MUST feed the handle to `closeNativeHandle()` to avoid leaking an
-/// NT HANDLE / IOSurface per frame.
+/// the caller, who MUST pass it to `closeNativeHandle()` exactly once —
+/// whether or not it was imported. `sharedTexture.importSharedTexture` never
+/// takes ownership: it duplicates the NT HANDLE (Windows) or retains the
+/// IOSurface (macOS) into its own reference, so `closeNativeHandle()` is safe
+/// immediately after the import call returns (success or throw). Skipping it
+/// leaks one NT HANDLE / IOSurface retain per frame.
 ///
 /// The `ownerPid` field is the process ID in which the handle is valid, so
 /// Chromium's GPU process can duplicate it correctly.
@@ -384,7 +382,8 @@ impl TextureReceiver {
     /// The returned object can be handed to Electron's
     /// `sharedTexture.importSharedTexture` after wrapping the `handle` Buffer
     /// under the appropriate platform key (`ntHandle` on Windows,
-    /// `ioSurface` on macOS).
+    /// `ioSurface` on macOS). The caller must then pass `handle` to
+    /// `closeNativeHandle()` exactly once (see `SharedTextureFrame`).
     #[napi]
     pub fn receive_shared_texture(&self) -> Result<Option<SharedTextureFrame>> {
         let inner = match &self.inner {
@@ -532,9 +531,11 @@ fn dxgi_format_to_pixel_format(format: u32) -> std::result::Result<&'static str,
     }
 }
 
-/// Release a native shared texture handle (NT HANDLE on Windows, IOSurfaceRef
-/// on macOS) that was minted by receiveSharedTexture() but never consumed by
-/// Electron's importSharedTexture. Buffer must be 8 bytes LE.
+/// Release the caller's reference on a native shared texture handle (NT HANDLE
+/// on Windows, IOSurfaceRef on macOS) minted by receiveSharedTexture(). Call
+/// exactly once per handle — after importSharedTexture returns (Electron keeps
+/// its own duplicated / retained reference) or instead of importing it.
+/// Buffer must be 8 bytes LE.
 #[napi]
 pub fn close_native_handle(handle: napi::bindgen_prelude::Buffer) -> Result<()> {
     if handle.len() != 8 {

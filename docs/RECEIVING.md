@@ -7,7 +7,7 @@ There are two receive paths, and they solve different problems:
 
 Pick whichever matches what you will do with the frame.
 
-> **Status.** The zero-copy GPU path is verified end-to-end on both Windows (Spout) and macOS (Syphon Metal). On macOS the receiver mints a fresh per-frame `IOSurfaceRef` backed by a per-receiver staging `MTLTexture` and Y-flips it through a tiny render pass so `drawImage(videoFrame)` / `importExternalTexture({ source: videoFrame })` render right-side-up. The same `closeNativeHandle()` ownership contract applies on both platforms.
+> **Status.** The zero-copy GPU path is verified end-to-end on both Windows (Spout) and macOS (Syphon Metal). On macOS the receiver mints a fresh per-frame `IOSurfaceRef` backed by a per-receiver staging `MTLTexture` and Y-flips it through a tiny render pass so `drawImage(videoFrame)` / `importExternalTexture({ source: videoFrame })` render right-side-up. The same `closeNativeHandle()` ownership contract (below) applies on both platforms.
 
 ## Main process: `createSharedTextureReceiver`
 
@@ -102,15 +102,16 @@ if (frame) {
       },
     });
     // ... deliver `imported` via sendSharedTexture, then imported.release() ...
-  } catch (err) {
-    // importSharedTexture threw before taking ownership — release ourselves.
+  } finally {
+    // importSharedTexture never adopts the handle (it keeps its own
+    // duplicated / retained reference), so release ours whether the import
+    // succeeded or threw.
     closeNativeHandle(frame.handle);
-    throw err;
   }
 }
 ```
 
-> **Ownership contract.** Every `SharedTextureFrame.handle` returned by `receiveSharedTexture()` is a freshly-minted native handle. On a successful `importSharedTexture` Electron takes ownership and releases it when the imported texture is released. On **any** path that does not feed the handle into `importSharedTexture` (unknown pixel format, target destroyed, `importSharedTexture` threw, you decided to skip the frame), you **must** call `closeNativeHandle(frame.handle)` or you will leak an NT HANDLE (Windows) / `IOSurfaceRef` (macOS) per frame.
+> **Ownership contract.** Every `SharedTextureFrame.handle` returned by `receiveSharedTexture()` is a freshly-minted native handle that you own, and you **must** pass it to `closeNativeHandle(frame.handle)` exactly once — on **every** path, including a successful `importSharedTexture`. Electron never takes ownership of the handle: `importSharedTexture` `DuplicateHandle`s the NT handle (Windows) / retains the `IOSurfaceRef` (macOS) into its own reference, which it drops when the imported texture is released. So it is safe to close right after the import call returns, success or throw — the `finally` above. Paths that never import (unknown pixel format, target destroyed, you decided to skip the frame) close it too. Skipping the close leaks one NT HANDLE (Windows) / `IOSurfaceRef` retain (macOS) per frame. `createSharedTextureReceiver` does all of this for you.
 
 ## Discovering available senders
 

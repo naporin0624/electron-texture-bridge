@@ -7,7 +7,7 @@
 
 そのフレームで何をしたいかに応じて、どちらか一方を選んでください。
 
-> **ステータス。** ゼロコピー GPU 経路は Windows（Spout）と macOS（Syphon Metal）の両方でエンドツーエンドの動作を確認済みです。macOS ではレシーバーがフレームごとに新しい `IOSurfaceRef` を発行し、レシーバーごとのステージング用 `MTLTexture` を経由して小さなレンダーパスで Y 反転を行うため、`drawImage(videoFrame)` / `importExternalTexture({ source: videoFrame })` の結果が正しい向きで表示されます。同じ `closeNativeHandle()` の所有権契約が両プラットフォームに適用されます。
+> **ステータス。** ゼロコピー GPU 経路は Windows（Spout）と macOS（Syphon Metal）の両方でエンドツーエンドの動作を確認済みです。macOS ではレシーバーがフレームごとに新しい `IOSurfaceRef` を発行し、レシーバーごとのステージング用 `MTLTexture` を経由して小さなレンダーパスで Y 反転を行うため、`drawImage(videoFrame)` / `importExternalTexture({ source: videoFrame })` の結果が正しい向きで表示されます。同じ `closeNativeHandle()` の所有権契約（後述）が両プラットフォームに適用されます。
 
 ## メインプロセス: `createSharedTextureReceiver`
 
@@ -102,15 +102,15 @@ if (frame) {
       },
     });
     // ... deliver `imported` via sendSharedTexture, then imported.release() ...
-  } catch (err) {
-    // importSharedTexture threw before taking ownership — release ourselves.
+  } finally {
+    // importSharedTexture はハンドルを引き取らない（自前で複製 / retain した
+    // 参照を持つ）ため、import の成否に関わらず自分の参照を解放する。
     closeNativeHandle(frame.handle);
-    throw err;
   }
 }
 ```
 
-> **所有権契約。** `receiveSharedTexture()` が返す `SharedTextureFrame.handle` は、そのつど新しく発行されたネイティブハンドルです。`importSharedTexture` が成功すると、Electron がそのハンドルの所有権を引き受け、import 済みテクスチャが release されたタイミングで解放します。ハンドルが `importSharedTexture` に渡らない経路（未知のピクセルフォーマット、ターゲットが破棄済み、`importSharedTexture` が例外を投げた、フレームをスキップすると決めた、など）を通った場合は**必ず** `closeNativeHandle(frame.handle)` を呼んでください。呼ばないと、フレームごとに NT HANDLE（Windows）/ `IOSurfaceRef`（macOS）がリークします。
+> **所有権契約。** `receiveSharedTexture()` が返す `SharedTextureFrame.handle` は、そのつど新しく発行され、呼び出し側が所有するネイティブハンドルです。`importSharedTexture` が成功した場合も含め、**すべての**経路で `closeNativeHandle(frame.handle)` をちょうど 1 回呼んでください。Electron はハンドルの所有権を引き取りません。`importSharedTexture` は NT ハンドルを `DuplicateHandle`（Windows）し、`IOSurfaceRef` を retain（macOS）して自前の参照を持ち、import 済みテクスチャが release されたときにその参照を手放します。そのため、import の呼び出しが返った直後（成功でも例外でも）に close して問題ありません。上の例の `finally` がこれにあたります。import しない経路（未知のピクセルフォーマット、ターゲットが破棄済み、フレームをスキップすると決めた、など）でも close します。close を忘れると、フレームごとに NT HANDLE（Windows）/ `IOSurfaceRef` の retain（macOS）が 1 つずつリークします。`createSharedTextureReceiver` はこれをすべて自動で行います。
 
 ## 利用可能なセンダーの検出
 
