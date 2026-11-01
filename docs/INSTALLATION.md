@@ -228,7 +228,10 @@ and `vendor/Spout2/SpoutGL/`.
 **PowerShell:**
 
 ```powershell
-git clone --depth 1 https://github.com/leadedge/Spout2.git _spout2_tmp
+git init _spout2_tmp
+git -C _spout2_tmp remote add origin https://github.com/leadedge/Spout2.git
+git -C _spout2_tmp fetch --depth 1 origin 6b68a5b4fdeca6130b851e5f9366467a844860e5
+git -C _spout2_tmp checkout --detach FETCH_HEAD
 New-Item -ItemType Directory -Force vendor\Spout2 | Out-Null
 Copy-Item -Recurse _spout2_tmp\SPOUTSDK\SpoutDirectX vendor\Spout2\SpoutDirectX
 Copy-Item -Recurse _spout2_tmp\SPOUTSDK\SpoutGL vendor\Spout2\SpoutGL
@@ -238,7 +241,10 @@ Remove-Item -Recurse -Force _spout2_tmp
 **Bash (Git Bash / WSL):**
 
 ```bash
-git clone --depth 1 https://github.com/leadedge/Spout2.git _spout2_tmp
+git init _spout2_tmp
+git -C _spout2_tmp remote add origin https://github.com/leadedge/Spout2.git
+git -C _spout2_tmp fetch --depth 1 origin 6b68a5b4fdeca6130b851e5f9366467a844860e5
+git -C _spout2_tmp checkout --detach FETCH_HEAD
 mkdir -p vendor/Spout2
 cp -r _spout2_tmp/SPOUTSDK/SpoutDirectX vendor/Spout2/SpoutDirectX
 cp -r _spout2_tmp/SPOUTSDK/SpoutGL vendor/Spout2/SpoutGL
@@ -560,7 +566,10 @@ present. `build.rs` expects `vendor/Spout2/SpoutDirectX/SpoutDX/` and
 `vendor/Spout2/SpoutGL/` — re-fetch both trees:
 
 ```bash
-git clone --depth 1 https://github.com/leadedge/Spout2.git _spout2_tmp
+git init _spout2_tmp
+git -C _spout2_tmp remote add origin https://github.com/leadedge/Spout2.git
+git -C _spout2_tmp fetch --depth 1 origin 6b68a5b4fdeca6130b851e5f9366467a844860e5
+git -C _spout2_tmp checkout --detach FETCH_HEAD
 mkdir -p vendor/Spout2
 cp -r _spout2_tmp/SPOUTSDK/SpoutDirectX vendor/Spout2/SpoutDirectX
 cp -r _spout2_tmp/SPOUTSDK/SpoutGL vendor/Spout2/SpoutGL

@@ -80,8 +80,17 @@ jobs:
       - name: Fetch Spout2 SDK
         if: runner.os == 'Windows'
         shell: pwsh
+        env:
+          SPOUT2_SHA: 6b68a5b4fdeca6130b851e5f9366467a844860e5 # 2.007.018
         run: |
-          git clone --depth 1 https://github.com/leadedge/Spout2.git _spout2_tmp
+          git init _spout2_tmp
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          git -C _spout2_tmp remote add origin https://github.com/leadedge/Spout2.git
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          git -C _spout2_tmp fetch --depth 1 origin $env:SPOUT2_SHA
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          git -C _spout2_tmp checkout --detach FETCH_HEAD
+          if ($LASTEXITCODE -ne 0) { exit 1 }
           New-Item -ItemType Directory -Force vendor/Spout2
           Copy-Item -Recurse _spout2_tmp/SPOUTSDK/SpoutDirectX vendor/Spout2/SpoutDirectX
           Copy-Item -Recurse _spout2_tmp/SPOUTSDK/SpoutGL vendor/Spout2/SpoutGL
