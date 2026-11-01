@@ -59,7 +59,10 @@ cp -R build/Build/Products/Release/Syphon.framework ../Syphon.framework
 
 **Windows:** Clone Spout2 SDK into vendor (directory structure must be preserved for relative includes):
 ```bash
-git clone --depth 1 https://github.com/leadedge/Spout2.git _tmp
+git init _tmp
+git -C _tmp remote add origin https://github.com/leadedge/Spout2.git
+git -C _tmp fetch --depth 1 origin 6b68a5b4fdeca6130b851e5f9366467a844860e5
+git -C _tmp checkout --detach FETCH_HEAD
 mkdir -p vendor/Spout2
 cp -r _tmp/SPOUTSDK/SpoutDirectX vendor/Spout2/SpoutDirectX
 cp -r _tmp/SPOUTSDK/SpoutGL vendor/Spout2/SpoutGL
