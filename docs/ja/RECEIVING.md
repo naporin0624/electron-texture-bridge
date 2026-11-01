@@ -49,6 +49,30 @@ app.whenReady().then(() => {
 
 このブリッジは drop-latest ポリシーで動作します。前回の `sendSharedTexture` がまだ処理中の状態で次のポーリングが発火した場合、そのティックはスキップされます。これにより main プロセス側で保持される import 済みテクスチャ参照は常に最大 1 個に抑えられ、レンダラーの処理が遅い場合でもフレームが積み上がるのを防ぎます。
 
+### 1 つのソースを複数のビューアーで見る: `forwardFrames`
+
+ビューアーごとにレシーバーを作ると、ビューアーの数だけフレームごとのネイティブのステージングコピーと import が発生します。代わりにソースごとにレシーバーを **1 つ** 作り、各ビューアーを `forwardFrames` で登録してください。各フレームは 1 回だけ受信・import され、全 target に送られます。
+
+```typescript
+const receiver = createSharedTextureReceiver({ senderName: "Resolume Arena" }); // target は不要
+const forwards = new Map<number, FrameForward>();
+
+const connect = (slot: number, viewer: BrowserWindow): void => {
+  forwards.get(slot)?.dispose();
+  forwards.set(
+    slot,
+    receiver.forwardFrames(viewer.webContents, {
+      extraArgs: [slot], // consumer の末尾引数として届く
+      onStatus: (status) => console.log(`[slot ${slot}]`, status),
+    }),
+  );
+};
+
+receiver.start();
+```
+
+target ごとに latest-wins の枠を持つので、遅いビューアーは自分の分のフレームだけを落とします。forward の失敗は `onStatus` でのみ通知され、サーキットブレーカーには数えません。forward はウィンドウが破棄されると自動で登録解除されます。生きている target が 1 つもなければ、フレームは import されません。契約の詳細は [`forwardFrames`](API.md#sharedtexturereceiverbridgeforwardframestarget-options) を参照してください。
+
 ### push モードとステージングリング
 
 `mode: "push"`（macOS / Windows の既定値）では、ネイティブ側がセンダーの新しいフレームをレシーバーが所有する 3 つの GPU スロットのいずれかにステージングし、そのスロットのハンドルでコールバックします。送信中に届いたフレームは最新の 1 つだけを保持します（latest-wins）。ブリッジは `importSharedTexture` が返った直後に毎回ハンドルを close します（Electron は自前の参照を持つため）。そのため、スロットが「下流でまだ使われているか」の判定に呼び出し側のハンドルは使えません。

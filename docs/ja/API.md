@@ -198,12 +198,12 @@ Electron の単一の `sharedTexture.setSharedTextureReceiver` スロットを�
 ```typescript
 interface SharedTextureReceiverOptions {
   senderName: string;                 // Syphon サーバー / Spout センダー名
-  target: Electron.WebContents;       // レシーバーウィンドウの webContents
+  target?: Electron.WebContents;      // primary のレシーバー webContents（省略可: すべて forwardFrames で登録してもよい）
   mode?: "push" | "poll";             // macOS/Windows は "push"、それ以外は "poll" がデフォルト。push は latest-wins
   pollIntervalMs?: number;            // poll モードのみ。デフォルト 16（約 60fps）；drop-latest を適用
   appName?: string;                   // （macOS のみ）アプリケーション名でフィルタ
   serverUuid?: string;                // （macOS のみ）サーバー UUID で接続
-  extraArgs?: readonly unknown[];     // sendSharedTexture(..., ...args) へ転送される
+  extraArgs?: readonly unknown[];     // primary target のみ。sendSharedTexture(..., ...args) へ転送される
 }
 
 interface SharedTextureReceiverBridge {
@@ -216,11 +216,39 @@ interface SharedTextureReceiverBridge {
   dispose(): void;                    // 終端: stop + ネイティブレシーバーの release
   [Symbol.dispose](): void;           // dispose() と同じ
 
+  // fan-out: 1 フレームにつきネイティブ受信 1 回・import 1 回で全 target へ送る
+  forwardFrames(target: Electron.WebContents, options?: FrameForwardOptions): FrameForward;
+
   readonly isDisposed: boolean;
 }
 ```
 
 `dispose()` は終端かつ冪等です。`"error"` イベントが 10 回連続すると、ブリッジは自動的に停止し（サーキットブレーカー）、シャットダウン理由を説明する最終エラーを 1 回発火します。
+
+#### `SharedTextureReceiverBridge.forwardFrames(target, options?)`
+
+ネイティブ受信を増やさずに、同じソースを別の target にも配信します。各フレームは 1 回だけ import され、生きている全 target（省略可能な primary の `target` と、すべての forward）に送られます。import 済みテクスチャは、そのフレームの送信がすべて完了（成功・失敗とも）した後に 1 回だけ release されます。
+
+```typescript
+// ソース 1 つにレシーバー 1 つ、ビューアーは複数
+const receiver = createSharedTextureReceiver({ senderName: "Resolume Arena" });
+const main = receiver.forwardFrames(mainWindow.webContents, { extraArgs: [0] });
+const monitor = receiver.forwardFrames(multiviewer.webContents, {
+  extraArgs: [3],
+  onStatus: (status) => console.log("[monitor]", status),
+});
+receiver.start();
+
+monitor.dispose(); // その target への配信を止める（冪等）
+```
+
+契約は [`TextureBridge.forwardFrames`](#texturebridgeforwardframestarget-options) と同じです。受信側に固有の点は次のとおりです。
+
+- **target ごとの latest-wins。** 各 target は送信中 1 つと待機中 1 つまでしかフレームを持ちません。遅い renderer は自分の分だけフレームを落とし、ほかの target は全フレームを受け取り続けます。
+- **best-effort。** forward の import / 送信の失敗は `onStatus`（状態が変わったときだけ）でのみ通知されます。`"error"` には出ず、サーキットブレーカーにも数えません。受信エラー、import エラー、primary の `target` への送信エラーは従来どおり `"error"` とサーキットブレーカーで扱います。
+- **target がなければ import しない。** 生きている target が 1 つもないとき（target なしのレシーバーで forward をすべて dispose した場合など）は、import せずにネイティブハンドルを close します。
+- **ライフサイクル。** forward は target が破棄されると自動で登録解除されます。`stop()` / `dispose()` は待機中のフレームをすべて手放し、戻った後に送信は起きません。`dispose()` 後や破棄済みの target で `forwardFrames()` を呼ぶと、何もしない handle（`active: false`）が返ります。
+- `"fps"` は少なくとも 1 つの target に届いたフレームを数えます。届いたフレームはサーキットブレーカーのカウンタもリセットします。
 
 ### `createTextureReceiver(options): TextureReceiverBridge`
 

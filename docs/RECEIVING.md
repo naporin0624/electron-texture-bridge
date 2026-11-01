@@ -49,6 +49,30 @@ app.whenReady().then(() => {
 
 The bridge runs with a drop-latest policy: if a previous `sendSharedTexture` is still in flight when the next poll fires, the tick is skipped. This keeps at most one imported-texture reference alive on the main process and prevents frame pile-up when the renderer is slow.
 
+### Several viewers of one source: `forwardFrames`
+
+Creating one receiver per viewer makes every viewer pay its own native staging copy and import per frame. Instead, create **one** receiver per source and register each viewer with `forwardFrames` — every frame is received and imported once, then sent to every target:
+
+```typescript
+const receiver = createSharedTextureReceiver({ senderName: "Resolume Arena" }); // no target needed
+const forwards = new Map<number, FrameForward>();
+
+const connect = (slot: number, viewer: BrowserWindow): void => {
+  forwards.get(slot)?.dispose();
+  forwards.set(
+    slot,
+    receiver.forwardFrames(viewer.webContents, {
+      extraArgs: [slot], // arrives as the consumer's trailing argument
+      onStatus: (status) => console.log(`[slot ${slot}]`, status),
+    }),
+  );
+};
+
+receiver.start();
+```
+
+Each target has its own latest-wins slot, so a slow viewer only drops its own frames. A forward's failures are reported through `onStatus` only and never trip the circuit breaker; a forward unregisters itself when its window is destroyed. With no live target the frames are not imported at all. See [`forwardFrames`](API.md#sharedtexturereceiverbridgeforwardframestarget-options) for the full contract.
+
 ### Push mode and the staging ring
 
 In `mode: "push"` (the default on macOS / Windows) the native side stages each new sender frame into one of 3 receiver-owned GPU slots and calls back with that slot's handle; while a send is in flight the bridge keeps only the newest pushed frame (latest-wins). The bridge closes every handle right after `importSharedTexture` returns — Electron keeps its own reference — so a slot's "still held downstream" check cannot rely on the caller's handle:
