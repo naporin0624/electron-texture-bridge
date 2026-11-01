@@ -10,7 +10,13 @@ import path from "path";
 import { pathToFileURL } from "node:url";
 import { createTextureBridge, createSharedTextureReceiver } from "@napolab/texture-bridge-renderer";
 import { listSenders } from "@napolab/texture-bridge";
-import type { TextureBridge } from "@napolab/texture-bridge-renderer";
+import type { WebContents } from "electron";
+import type {
+  ForwardStatus,
+  FrameForward,
+  SharedTextureReceiverBridge,
+  TextureBridge,
+} from "@napolab/texture-bridge-renderer";
 
 /** Source descriptor for a multiviewer slot — mirrored structurally over IPC (no shared type import). */
 type SlotSourceDescriptor = { kind: "local"; id: string } | { kind: "syphon"; senderName: string };
@@ -44,6 +50,126 @@ const getGridDemoBase = (): string => {
     return process.env.ELECTRON_RENDERER_URL;
   }
   return pathToFileURL(path.join(__dirname, "../renderer")).href;
+};
+
+type SlotStatusKind = "state" | "metric";
+type SendSlotStatus = (slot: number, kind: SlotStatusKind, text: string) => void;
+
+/**
+ * One native Syphon/Spout receiver shared by every multiviewer slot that
+ * selected the same sender with the same flipY. Each slot is one
+ * `forwardFrames` registration on it, so a frame is received and imported
+ * once however many slots show it.
+ */
+type SharedSyphonReceiver = {
+  readonly receiver: SharedTextureReceiverBridge;
+  readonly forwards: Map<number, FrameForward>;
+};
+
+/**
+ * flipY is part of the key because it is a per-receiver setting: slots that
+ * want different orientations of the same sender need separate receivers.
+ * NUL cannot appear in a sender name, so the join is unambiguous.
+ */
+const toSyphonReceiverKey = (senderName: string, flipY: boolean): string =>
+  `${senderName}\u0000${flipY}`;
+
+/** Push one status line to every slot currently fed by `shared`. */
+const broadcastSlotStatus = (
+  shared: SharedSyphonReceiver,
+  sendSlotStatus: SendSlotStatus,
+  kind: SlotStatusKind,
+  text: string,
+): void => {
+  for (const slot of shared.forwards.keys()) {
+    sendSlotStatus(slot, kind, text);
+  }
+};
+
+/**
+ * Build a target-less receiver for `senderName`. Its fps and errors belong
+ * to the receiver, not to any one slot, so they are broadcast to every slot
+ * attached at the time they fire. Not started here — the caller starts it
+ * once the first slot is attached, so an early error has a slot to land on.
+ */
+const createSharedSyphonReceiver = (
+  senderName: string,
+  flipY: boolean,
+  sendSlotStatus: SendSlotStatus,
+): SharedSyphonReceiver => {
+  const shared: SharedSyphonReceiver = {
+    receiver: createSharedTextureReceiver({ senderName, pollIntervalMs: 8, flipY }),
+    forwards: new Map(),
+  };
+  shared.receiver.on("fps", (fps) => {
+    broadcastSlotStatus(shared, sendSlotStatus, "metric", `fps: ${fps.toFixed(1)}`);
+  });
+  shared.receiver.on("error", (err) => {
+    broadcastSlotStatus(shared, sendSlotStatus, "state", `error: ${err.message}`);
+  });
+  return shared;
+};
+
+/** Look up the receiver for `key`, creating and registering it on first use. */
+const acquireSharedSyphonReceiver = (
+  registry: Map<string, SharedSyphonReceiver>,
+  key: string,
+  senderName: string,
+  flipY: boolean,
+  sendSlotStatus: SendSlotStatus,
+): SharedSyphonReceiver => {
+  const existing = registry.get(key);
+  if (existing) return existing;
+  const created = createSharedSyphonReceiver(senderName, flipY, sendSlotStatus);
+  registry.set(key, created);
+  return created;
+};
+
+/**
+ * Per-slot delivery state. Only transitions arrive here: a recovery restores
+ * the "connected" text a previous failure replaced.
+ */
+const describeForwardStatus = (status: ForwardStatus, senderName: string): string => {
+  if (status.ok) return `connected: syphon (${senderName})`;
+  if (!status.cause) return `error: forward ${status.reason}`;
+  return `error: forward ${status.reason}: ${status.cause.message}`;
+};
+
+/** Register `slot` on `shared` and make sure the receiver is running. */
+const attachSyphonSlot = (
+  shared: SharedSyphonReceiver,
+  target: WebContents,
+  slot: number,
+  senderName: string,
+  sendSlotStatus: SendSlotStatus,
+): void => {
+  const forward = shared.receiver.forwardFrames(target, {
+    extraArgs: [slot],
+    onStatus: (status) => {
+      sendSlotStatus(slot, "state", describeForwardStatus(status, senderName));
+    },
+  });
+  shared.forwards.set(slot, forward);
+  // Idempotent — only the first attach actually starts receiving.
+  shared.receiver.start();
+};
+
+/**
+ * Detach `slot` from the receiver under `key`. The last slot out disposes
+ * the receiver (stopping the native receive) and drops the registry entry.
+ */
+const releaseSyphonSlot = (
+  registry: Map<string, SharedSyphonReceiver>,
+  key: string,
+  slot: number,
+): void => {
+  const shared = registry.get(key);
+  if (!shared) return;
+  shared.forwards.get(slot)?.dispose();
+  shared.forwards.delete(slot);
+  if (shared.forwards.size > 0) return;
+  shared.receiver.dispose();
+  registry.delete(key);
 };
 
 const bootstrap = async (): Promise<void> => {
@@ -310,10 +436,17 @@ const bootstrap = async (): Promise<void> => {
   };
 
   // Each slot holds whichever `dispose()`-able handle is currently feeding
-  // it — a `FrameForward` (local route) or a `SharedTextureReceiverBridge`
-  // (Syphon route) — wrapped behind a common shape so `multi-connect` /
-  // `multi-disconnect` don't need to know which route is active.
+  // it — a `FrameForward` (local route) or its registration on a shared
+  // Syphon receiver (Syphon route) — wrapped behind a common shape so
+  // `multi-connect` / `multi-disconnect` don't need to know which route is
+  // active.
   const slots = new Map<number, { dispose(): void }>();
+
+  // Syphon route: one receiver per (senderName, flipY), shared by every slot
+  // showing that source. Entries live exactly as long as they have a slot —
+  // `releaseSyphonSlot` drops one when its last slot goes — so disposing
+  // every slot (window close / reload / crash) empties this too.
+  const syphonReceivers = new Map<string, SharedSyphonReceiver>();
 
   const disposeSlot = (slot: number): void => {
     const existing = slots.get(slot);
@@ -375,21 +508,27 @@ const bootstrap = async (): Promise<void> => {
           return;
         }
         case "syphon": {
-          const receiver = createSharedTextureReceiver({
-            senderName: source.senderName,
-            target: multiviewerWindow.webContents,
-            extraArgs: [slot],
-            pollIntervalMs: 8,
+          // flipY is read once at connect time (the UI checkbox only affects
+          // newly connected slots), so it is just part of the key: a slot
+          // reconnected with a different flipY lands on — or creates — the
+          // receiver for its new key, and the `disposeSlot` above already
+          // released it from the old one.
+          const key = toSyphonReceiverKey(source.senderName, flipY);
+          const shared = acquireSharedSyphonReceiver(
+            syphonReceivers,
+            key,
+            source.senderName,
             flipY,
-          });
-          receiver.on("fps", (fps) => {
-            sendSlotStatus(slot, "metric", `fps: ${fps.toFixed(1)}`);
-          });
-          receiver.on("error", (err) => {
-            sendSlotStatus(slot, "state", `error: ${err.message}`);
-          });
-          receiver.start();
-          slots.set(slot, { dispose: () => receiver.dispose() });
+            sendSlotStatus,
+          );
+          attachSyphonSlot(
+            shared,
+            multiviewerWindow.webContents,
+            slot,
+            source.senderName,
+            sendSlotStatus,
+          );
+          slots.set(slot, { dispose: () => releaseSyphonSlot(syphonReceivers, key, slot) });
           sendSlotStatus(slot, "state", `connected: syphon (${source.senderName})`);
           return;
         }

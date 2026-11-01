@@ -222,12 +222,12 @@ Factory function that creates a **zero-copy GPU** receiver bridge. Polls `Textur
 ```typescript
 interface SharedTextureReceiverOptions {
   senderName: string;                 // Syphon server / Spout sender name
-  target: Electron.WebContents;       // Receiver window webContents
+  target?: Electron.WebContents;      // primary receiver webContents (optional: use forwardFrames for every target)
   mode?: "push" | "poll";             // default "push" on macOS/Windows, "poll" elsewhere; push is latest-wins
   pollIntervalMs?: number;            // poll mode only; default 16 (~60 fps); drop-latest applied
   appName?: string;                   // (macOS only) filter by application name
   serverUuid?: string;                // (macOS only) connect by server UUID
-  extraArgs?: readonly unknown[];     // forwarded to sendSharedTexture(..., ...args)
+  extraArgs?: readonly unknown[];     // primary target only; forwarded to sendSharedTexture(..., ...args)
 }
 
 interface SharedTextureReceiverBridge {
@@ -240,11 +240,39 @@ interface SharedTextureReceiverBridge {
   dispose(): void;                    // terminal: stop + release native receiver
   [Symbol.dispose](): void;           // same as dispose()
 
+  // fan-out: one native receive + one import per frame, sent to every target
+  forwardFrames(target: Electron.WebContents, options?: FrameForwardOptions): FrameForward;
+
   readonly isDisposed: boolean;
 }
 ```
 
 `dispose()` is terminal and idempotent. After 10 consecutive `"error"` events the bridge stops itself automatically (circuit breaker) and emits one final error describing the shutdown.
+
+#### `SharedTextureReceiverBridge.forwardFrames(target, options?)`
+
+Delivers the same source to more targets without another native receive. Each frame is imported once, sent to every live target (the optional primary `target` plus every forward), and the imported texture is released once after every send of that frame has settled.
+
+```typescript
+// one receiver per source, many viewers
+const receiver = createSharedTextureReceiver({ senderName: "Resolume Arena" });
+const main = receiver.forwardFrames(mainWindow.webContents, { extraArgs: [0] });
+const monitor = receiver.forwardFrames(multiviewer.webContents, {
+  extraArgs: [3],
+  onStatus: (status) => console.log("[monitor]", status),
+});
+receiver.start();
+
+monitor.dispose(); // stop delivering to that target (idempotent)
+```
+
+Same contract as [`TextureBridge.forwardFrames`](#texturebridgeforwardframestarget-options), with the receive-side specifics:
+
+- **Per-target latest-wins.** Each target keeps at most one in-flight send and one queued frame. A slow renderer drops only its own frames; the others keep receiving every frame.
+- **Best-effort.** A forward's import/send failures are reported only through `onStatus` (deduped to state changes) — never on `"error"`, and they never trip the circuit breaker. Receive and import errors, and send errors of the primary `target`, keep the existing `"error"` + circuit-breaker semantics.
+- **No target, no import.** With no live target (target-less receiver whose forwards are all disposed) the native handle is closed without importing.
+- **Lifecycle.** A forward unregisters itself when its target is destroyed. `stop()` / `dispose()` drop every queued frame; nothing is sent after they return. Calling `forwardFrames()` after `dispose()` or with an already-destroyed target returns an inert handle (`active: false`).
+- `"fps"` counts frames delivered to at least one target. A delivered frame resets the circuit-breaker counter.
 
 ### `createTextureReceiver(options): TextureReceiverBridge`
 
