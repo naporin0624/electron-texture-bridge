@@ -152,7 +152,7 @@ Registers a `WebContents` (e.g. a monitor/multiviewer window) to receive every s
 
 `FrameForward.dispose()` unregisters that one target and is idempotent — calling it twice, or after `bridge.dispose()` already cleared it, is a no-op. `bridge.dispose()` clears every registered forward.
 
-The receiving end needs nothing new: a forwarded target consumes frames exactly like a Syphon/Spout receiver does — call `installSharedTextureReceiver()` once at renderer startup, then `consumeSharedTexture({ onFrame: (frame, ...extraArgs) => ... })`. The `extraArgs` passed to `forwardFrames(target, { extraArgs })` arrive verbatim as the handler's trailing arguments, so one target can demultiplex frames forwarded from several sources (e.g. tag each source with its slot index).
+The receiving end needs nothing new: a forwarded target consumes frames exactly like a Syphon/Spout receiver does — call `bindSharedTextureReceiver(sharedTexture)` once at renderer startup, then `receiver.consume({ onFrame: (frame, ...extraArgs) => ... })`. The `extraArgs` passed to `forwardFrames(target, { extraArgs })` arrive verbatim as the handler's trailing arguments, so one target can demultiplex frames forwarded from several sources (e.g. tag each source with its slot index).
 
 The current implementation imports the texture once per registered target per frame. When several targets share the same source frame, there's room to optimize to "import once per frame → send to every target → release only after all sends settle" — documented as a future option rather than built now, since no current caller needs it (a multiviewer slot is one source to one target).
 
@@ -170,22 +170,17 @@ createWorkerRenderer({
 });
 ```
 
-### `installSharedTextureReceiver()` (from `renderer/client`)
+### `bindSharedTextureReceiver(sharedTexture)` (from `renderer/client`)
 
 ```typescript
-import { installSharedTextureReceiver } from "@napolab/texture-bridge-renderer/client";
+import { sharedTexture } from "electron";
+import { bindSharedTextureReceiver } from "@napolab/texture-bridge-renderer/client";
 
-installSharedTextureReceiver();
-```
+// Binds Electron's single sharedTexture.setSharedTextureReceiver slot —
+// the only side effect. Call once at renderer startup.
+const receiver = bindSharedTextureReceiver(sharedTexture);
 
-Binds Electron's single `sharedTexture.setSharedTextureReceiver` slot to an internal consumer pool so multiple `consumeSharedTexture` calls can coexist. Idempotent — call once at renderer startup before any `consumeSharedTexture` call. Requires Electron 40+.
-
-### `consumeSharedTexture(handlers)` (from `renderer/client`)
-
-```typescript
-import { consumeSharedTexture } from "@napolab/texture-bridge-renderer/client";
-
-const registration = consumeSharedTexture({
+const registration = receiver.consume({
   onFrame: ({ textureId, videoFrame }, ...extraArgs) => {
     // videoFrame is a Web VideoFrame backed by the shared texture.
     // drawImage(videoFrame) — zero-copy GPU blit
@@ -195,13 +190,30 @@ const registration = consumeSharedTexture({
 });
 
 registration.dispose();   // remove this consumer from the pool (idempotent)
+receiver.dispose();       // tear the binding down (idempotent)
 ```
 
-Registers a consumer in the pool bound by `installSharedTextureReceiver`. Each active consumer receives its own `VideoFrame` per incoming imported texture; the wrapper closes the `VideoFrame` after `onFrame` settles and releases the underlying imported texture exactly once after all consumers have finished.
+Binds Electron's single `sharedTexture.setSharedTextureReceiver` slot to a fresh consumer pool and returns a `BoundSharedTextureReceiver` handle. Electron's `sharedTexture` module is passed in rather than imported, so the binding has an explicit owner and lifetime (tests can pass `{ setSharedTextureReceiver: vi.fn() }`). Requires Electron 40+.
+
+The handle has two methods:
+
+- **`consume(handlers)`** — registers one consumer in this binding's pool and returns `{ dispose() }` (idempotent). Purely a registration; it never touches the Electron slot. Multiple consumers coexist: each active consumer receives its own `VideoFrame` per incoming imported texture, the wrapper closes that `VideoFrame` after `onFrame` settles, and the underlying imported texture is released exactly once after all consumers have finished. `extraArgs` passed by the main process (`forwardFrames(target, { extraArgs })`, `createSharedTextureReceiver({ extraArgs })`) arrive verbatim as the handler's trailing arguments.
+- **`dispose()`** — idempotent. Drops every registered consumer and frees the `sharedTexture` target so it can be bound again. Electron has no API to unset the receiver, so the installed callback stays and keeps draining (releasing) frames that still arrive; a later `bindSharedTextureReceiver` on the same target replaces it (Electron's slot is last-wins).
+
+Errors (both exported from `renderer/client`):
+
+| Error | Thrown when |
+| ----- | ----------- |
+| `SharedTextureReceiverAlreadyBoundError` | `bindSharedTextureReceiver` is called on a `sharedTexture` that already has a live binding. `dispose()` the existing binding first. |
+| `SharedTextureReceiverDisposedError` | `consume()` is called on a handle after its `dispose()`. |
+
+The handler types `SharedTextureConsumerFrame`, `SharedTextureConsumerHandlers`, `SharedTextureConsumerRegistration`, plus `BoundSharedTextureReceiver` and `SharedTextureReceiverTarget`, are exported from `renderer/client` as types.
+
+> This replaces the former global install-then-consume function pair, which has been removed. Migrate by binding once — `const receiver = bindSharedTextureReceiver(sharedTexture);` — and calling `receiver.consume(h)` wherever you previously registered a consumer.
 
 ### `createMultiDispatcher(options)` (from `renderer/client`)
 
-Low-level fan-out primitive: one `handler(...)` invokes all registered callbacks and reduces their results through a user-supplied `combine` function. `installSharedTextureReceiver` is built on top of it, but it is exported so you can build your own "one upstream slot, many downstream consumers" adapters (e.g. a preload-to-renderer bridge). See JSDoc in `packages/renderer/src/client/multi-dispatcher.ts` for the full API.
+Low-level fan-out primitive: one `handler(...)` invokes all registered callbacks and reduces their results through a user-supplied `combine` function. `bindSharedTextureReceiver` is built on top of it, but it is exported so you can build your own "one upstream slot, many downstream consumers" adapters (e.g. a preload-to-renderer bridge). See JSDoc in `packages/renderer/src/client/multi-dispatcher.ts` for the full API.
 
 ### `createSharedTextureReceiver(options): SharedTextureReceiverBridge`
 

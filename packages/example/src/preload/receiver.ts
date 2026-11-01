@@ -7,13 +7,10 @@
 // CJS module, whereas preload scripts are bundled by electron-vite with
 // `externalizeDepsPlugin` and resolve `electron` at runtime.
 
-import { ipcRenderer } from "electron";
-import {
-  installSharedTextureReceiver,
-  consumeSharedTexture,
-} from "@napolab/texture-bridge-renderer/client";
+import { ipcRenderer, sharedTexture } from "electron";
+import { bindSharedTextureReceiver } from "@napolab/texture-bridge-renderer/client";
 
-installSharedTextureReceiver();
+const receiver = bindSharedTextureReceiver(sharedTexture);
 
 type SenderEntry = { name: string; appName?: string };
 
@@ -52,7 +49,7 @@ const formatInfo = () => {
 // runs with drop-latest (`_inFlight`), so each delivered frame is already
 // the latest available. Awaiting rAF inside onFrame would only add one
 // vsync of latency without reducing GPU work.
-consumeSharedTexture({
+receiver.consume({
   onFrame: ({ videoFrame }) => {
     if (!ui) return;
     if (

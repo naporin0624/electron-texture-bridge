@@ -34,7 +34,7 @@ import { sendImportedTexture } from "@napolab/texture-bridge-core/electron";
 
 // frame — a WebFrameMain (win.webContents.mainFrame), NOT the WebContents.
 // imported — yours until this call; the library owns it afterwards.
-// extraArgs — arrive verbatim as trailing args in consumeSharedTexture's handler.
+// extraArgs — arrive verbatim as trailing args in receiver.consume()'s handler.
 await sendImportedTexture(win.webContents.mainFrame, imported, [slot]);
 ```
 

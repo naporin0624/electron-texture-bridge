@@ -128,7 +128,7 @@ forward.dispose(); // 冪等
 
 `FrameForward.dispose()` はその 1 件の登録だけを解除し、冪等です — 2 回呼んでも、あるいは `bridge.dispose()` が先に全登録を解除した後に呼んでも no-op です。`bridge.dispose()` は登録済みの転送をすべて解除します。
 
-受け取り側は新たに何も必要ありません: 転送先の target は Syphon/Spout レシーバーとまったく同じ方法でフレームを受け取ります — renderer 起動時に一度 `installSharedTextureReceiver()` を呼び、`consumeSharedTexture({ onFrame: (frame, ...extraArgs) => ... })` で受信します。`forwardFrames(target, { extraArgs })` に渡した `extraArgs` はハンドラの末尾引数としてそのまま届くため、1 つの target が複数ソースからの転送を（例えばスロット番号で）判別できます。
+受け取り側は新たに何も必要ありません: 転送先の target は Syphon/Spout レシーバーとまったく同じ方法でフレームを受け取ります — renderer 起動時に一度 `bindSharedTextureReceiver(sharedTexture)` を呼び、`receiver.consume({ onFrame: (frame, ...extraArgs) => ... })` で受信します。`forwardFrames(target, { extraArgs })` に渡した `extraArgs` はハンドラの末尾引数としてそのまま届くため、1 つの target が複数ソースからの転送を（例えばスロット番号で）判別できます。
 
 現在の実装は、フレームごとに登録済み target の数だけテクスチャを import します。複数 target が同一ソースフレームを共有する場合は「フレームごとに import は 1 回 → 全 target へ send → 全 send の settle 後に release」へ最適化する余地がありますが、現時点でその需要のある呼び出し元がないため（multiviewer は 1 ソース = 1 target）、将来のオプションとして記録するに留め、実装はしていません。
 
@@ -146,22 +146,17 @@ createWorkerRenderer({
 });
 ```
 
-### `installSharedTextureReceiver()`（`renderer/client` から）
+### `bindSharedTextureReceiver(sharedTexture)`（`renderer/client` から）
 
 ```typescript
-import { installSharedTextureReceiver } from "@napolab/texture-bridge-renderer/client";
+import { sharedTexture } from "electron";
+import { bindSharedTextureReceiver } from "@napolab/texture-bridge-renderer/client";
 
-installSharedTextureReceiver();
-```
+// Electron の単一の sharedTexture.setSharedTextureReceiver スロットを束縛します。
+// 副作用はこれだけです。レンダラー起動時に一度だけ呼び出してください。
+const receiver = bindSharedTextureReceiver(sharedTexture);
 
-Electron の単一の `sharedTexture.setSharedTextureReceiver` スロットを内部のコンシューマープールに束縛し、複数の `consumeSharedTexture` 呼び出しが共存できるようにします。冪等です — `consumeSharedTexture` を呼ぶ前に、レンダラー起動時に一度だけ呼び出してください。Electron 40+ が必要です。
-
-### `consumeSharedTexture(handlers)`（`renderer/client` から）
-
-```typescript
-import { consumeSharedTexture } from "@napolab/texture-bridge-renderer/client";
-
-const registration = consumeSharedTexture({
+const registration = receiver.consume({
   onFrame: ({ textureId, videoFrame }, ...extraArgs) => {
     // videoFrame は共有テクスチャに裏付けられた Web VideoFrame です。
     // drawImage(videoFrame) — ゼロコピー GPU blit
@@ -171,13 +166,30 @@ const registration = consumeSharedTexture({
 });
 
 registration.dispose();   // このコンシューマーをプールから削除（冪等）
+receiver.dispose();       // バインディングを破棄（冪等）
 ```
 
-`installSharedTextureReceiver` が束縛したプールにコンシューマーを登録します。アクティブな各コンシューマーは、届いた import 済みテクスチャごとに専用の `VideoFrame` を受け取ります。ラッパーは `onFrame` が完了した後に `VideoFrame` を close し、全コンシューマーの処理が終わった後に一度だけ、元の import 済みテクスチャを release します。
+Electron の単一の `sharedTexture.setSharedTextureReceiver` スロットを新しいコンシューマープールに束縛し、`BoundSharedTextureReceiver` ハンドルを返します。Electron の `sharedTexture` モジュールは内部で import せず引数で受け取るため、バインディングの持ち主と寿命がコード上で明確になります（テストでは `{ setSharedTextureReceiver: vi.fn() }` を渡せます）。Electron 40+ が必要です。
+
+ハンドルのメソッドは 2 つです。
+
+- **`consume(handlers)`** — このバインディングのプールにコンシューマーを 1 つ登録し、`{ dispose() }`（冪等）を返します。登録するだけで、Electron のスロットには触れません。複数のコンシューマーが共存でき、アクティブな各コンシューマーは届いた import 済みテクスチャごとに専用の `VideoFrame` を受け取ります。ラッパーは `onFrame` が完了した後にその `VideoFrame` を close し、全コンシューマーの処理が終わった後に一度だけ、元の import 済みテクスチャを release します。main プロセス側で渡した `extraArgs`（`forwardFrames(target, { extraArgs })`、`createSharedTextureReceiver({ extraArgs })`）は、ハンドラの末尾引数としてそのまま届きます。
+- **`dispose()`** — 冪等です。登録済みのコンシューマーをすべて破棄し、`sharedTexture` を再びバインドできる状態に戻します。Electron にはレシーバーを解除する API がないため、設置済みのコールバックは残り、その後に届いたフレームも引き続き受け取って release します。同じ target に対して再度 `bindSharedTextureReceiver` を呼ぶと、そのコールバックが置き換わります（Electron のスロットは後勝ちです）。
+
+エラー（どちらも `renderer/client` からエクスポートされています）:
+
+| エラー | 発生条件 |
+| ------ | -------- |
+| `SharedTextureReceiverAlreadyBoundError` | すでに有効なバインディングを持つ `sharedTexture` に対して `bindSharedTextureReceiver` を呼んだとき。先に既存のバインディングを `dispose()` してください。 |
+| `SharedTextureReceiverDisposedError` | `dispose()` 済みのハンドルで `consume()` を呼んだとき。 |
+
+ハンドラの型 `SharedTextureConsumerFrame`、`SharedTextureConsumerHandlers`、`SharedTextureConsumerRegistration` と、`BoundSharedTextureReceiver`、`SharedTextureReceiverTarget` は `renderer/client` から型としてエクスポートされています。
+
+> 以前のグローバルな「install してから consume する」関数ペアはこの API に置き換えられ、削除されました。移行するには、一度だけ `const receiver = bindSharedTextureReceiver(sharedTexture);` でバインドし、これまでコンシューマーを登録していた箇所で `receiver.consume(h)` を呼んでください。
 
 ### `createMultiDispatcher(options)`（`renderer/client` から）
 
-低レベルなファンアウト primitive です: 1 回の `handler(...)` 呼び出しが登録済みの全コールバックを呼び出し、その結果をユーザー指定の `combine` 関数で reduce します。`installSharedTextureReceiver` はこの上に構築されていますが、「1 つの上流スロットに対して複数の下流コンシューマー」というアダプター（例: preload→renderer ブリッジ）を自作できるようにエクスポートされています。完全な API は `packages/renderer/src/client/multi-dispatcher.ts` の JSDoc を参照してください。
+低レベルなファンアウト primitive です: 1 回の `handler(...)` 呼び出しが登録済みの全コールバックを呼び出し、その結果をユーザー指定の `combine` 関数で reduce します。`bindSharedTextureReceiver` はこの上に構築されていますが、「1 つの上流スロットに対して複数の下流コンシューマー」というアダプター（例: preload→renderer ブリッジ）を自作できるようにエクスポートされています。完全な API は `packages/renderer/src/client/multi-dispatcher.ts` の JSDoc を参照してください。
 
 ### `createSharedTextureReceiver(options): SharedTextureReceiverBridge`
 

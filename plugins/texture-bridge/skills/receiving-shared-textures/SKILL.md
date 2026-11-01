@@ -10,13 +10,18 @@ description: Use when implementing the receiving side of @napolab/texture-bridge
 Every shared-texture producer in `@napolab/texture-bridge` — `bridge.forwardFrames`, `forwardSharedTexture`, `createSharedTextureReceiver` — delivers to a renderer through the same consuming pair:
 
 ```typescript
-import {
-  installSharedTextureReceiver,
-  consumeSharedTexture,
-} from "@napolab/texture-bridge-renderer/client";   // the /client subpath — not the package root
+import { sharedTexture } from "electron";
+import { bindSharedTextureReceiver } from "@napolab/texture-bridge-renderer/client";   // the /client subpath — not the package root
+
+const receiver = bindSharedTextureReceiver(sharedTexture);
+const sub = receiver.consume({ onFrame: (frame, ...extraArgs) => { /* ... */ }, onError });
 ```
 
-`installSharedTextureReceiver()` — once at startup, before any consume call. It binds Electron's **single** `sharedTexture.setSharedTextureReceiver` slot to a pool so multiple consumers coexist. Idempotent. Never call `sharedTexture.setSharedTextureReceiver` yourself alongside it.
+`bindSharedTextureReceiver(sharedTexture)` — once at startup, before any consume call. It binds Electron's **single** `sharedTexture.setSharedTextureReceiver` slot to a pool so multiple consumers coexist; that bind is its only side effect. It returns a handle: `receiver.consume(handlers)` registers a consumer and returns `{ dispose() }`; `receiver.dispose()` (idempotent) empties the pool and frees the target. Never call `sharedTexture.setSharedTextureReceiver` yourself alongside it.
+
+- Binding the same `sharedTexture` twice without disposing throws `SharedTextureReceiverAlreadyBoundError`. Keep one binding per window and share the handle; re-binding is allowed after `receiver.dispose()`.
+- `receiver.consume()` after `receiver.dispose()` throws `SharedTextureReceiverDisposedError`.
+- Electron has no unset: after `receiver.dispose()` the installed callback stays and keeps draining (releasing) frames that still arrive.
 
 ## Window Setup
 
@@ -49,13 +54,11 @@ Latest-frame coalescing + rAF draw. Draw cost stays fixed at display refresh rat
 
 ```typescript
 // preload/monitor.ts
-import {
-  installSharedTextureReceiver,
-  consumeSharedTexture,
-} from "@napolab/texture-bridge-renderer/client";
+import { sharedTexture } from "electron";
+import { bindSharedTextureReceiver } from "@napolab/texture-bridge-renderer/client";
 import type { SharedTextureConsumerFrame } from "@napolab/texture-bridge-renderer/client";
 
-installSharedTextureReceiver();
+const receiver = bindSharedTextureReceiver(sharedTexture);
 
 const SLOT_COUNT = 4;
 const W = 480, H = 270;
@@ -67,7 +70,7 @@ const latest: (SharedTextureConsumerFrame | undefined)[] = Array.from({ length: 
 // letting it resurrect the slot.
 const connected: boolean[] = Array.from({ length: SLOT_COUNT }, () => false);
 
-consumeSharedTexture({
+receiver.consume({
   onFrame: (frame, ...args) => {
     const slot = args[0];
     if (typeof slot !== "number" || slot < 0 || slot >= SLOT_COUNT) return;
@@ -104,6 +107,7 @@ const disconnectSlot = (slot: number): void => {
 };
 
 window.addEventListener("beforeunload", () => {
+  receiver.dispose();
   for (const held of latest) held?.videoFrame.close();
 });
 ```
@@ -123,5 +127,6 @@ For WebGPU, replace `drawImage` with `device.importExternalTexture({ source: hel
 | Closing the superseded clone before `clone()` returns | If `clone()` throws you are left holding a closed frame; the next `drawImage` throws `InvalidStateError`. Clone first, then close. |
 | `requestAnimationFrame(draw)` outside a `finally` | One `drawImage`/`clone` throw ends the loop for the session — every deck freezes while arrival counters keep ticking. |
 | Clearing canvases between frames | Paint-driven sources go idle legitimately; clearing causes flicker. Clear only on disconnect (deck AND composite quadrant). |
-| `setSharedTextureReceiver` directly, or importing `/client` in a Vite renderer page | Single-slot API conflicts with the pool; Vite dev can't pre-bundle `electron`. Preload + `installSharedTextureReceiver()`. |
-| Inventing `exposeFrameReceiver` / `subscribeFrames` / `@napolab/texture-bridge/preload` | None exist. The receiving surface is exactly `installSharedTextureReceiver` + `consumeSharedTexture` (+ `createMultiDispatcher` for custom fan-out adapters). |
+| `setSharedTextureReceiver` directly, or importing `/client` in a Vite renderer page | Single-slot API conflicts with the pool; Vite dev can't pre-bundle `electron`. Preload + `bindSharedTextureReceiver(sharedTexture)`. |
+| Inventing `exposeFrameReceiver` / `subscribeFrames` / `@napolab/texture-bridge/preload` | None exist. The receiving surface is exactly `bindSharedTextureReceiver(sharedTexture)` + `receiver.consume(handlers)` (+ `createMultiDispatcher` for custom fan-out adapters). The old global install-then-consume function pair was removed — a zero-argument install call or a free-standing consume function is an invented API now; always go through the `receiver` handle. |
+| Calling `bindSharedTextureReceiver(sharedTexture)` in several modules of the same window | Second call throws `SharedTextureReceiverAlreadyBoundError`. Bind once, pass the handle around, and `receiver.consume()` per consumer. |

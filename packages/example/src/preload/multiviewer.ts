@@ -6,14 +6,11 @@
 // `@napolab/texture-bridge-renderer/client` directly at runtime, which
 // Vite's dev server cannot pre-bundle for a plain renderer HTML page.
 
-import { ipcRenderer } from "electron";
-import {
-  installSharedTextureReceiver,
-  consumeSharedTexture,
-} from "@napolab/texture-bridge-renderer/client";
+import { ipcRenderer, sharedTexture } from "electron";
+import { bindSharedTextureReceiver } from "@napolab/texture-bridge-renderer/client";
 import type { SharedTextureConsumerFrame } from "@napolab/texture-bridge-renderer/client";
 
-installSharedTextureReceiver();
+const receiver = bindSharedTextureReceiver(sharedTexture);
 
 const SLOT_COUNT = 4;
 const SLOTS = [0, 1, 2, 3] as const;
@@ -290,7 +287,7 @@ const buildDeckUI = (slot: number): DeckUI | null => {
 // Start the consumer pool immediately, mirroring receiver.ts. onFrame is a
 // no-op for a slot until the DOM is ready and its deck is wired below — the
 // guard just drops frames for out-of-range/untagged slots.
-consumeSharedTexture({
+receiver.consume({
   onFrame: (frame, ...args) => {
     const slot = args[0];
     if (typeof slot !== "number" || slot < 0 || slot > 3) return;

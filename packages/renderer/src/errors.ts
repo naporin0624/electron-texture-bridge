@@ -39,3 +39,21 @@ export class ReceiverStoppedError extends Error {
     super(`shared texture receiver stopped after ${limit} consecutive errors`);
   }
 }
+
+/** `bindSharedTextureReceiver` was called on a target that already has a live binding. */
+export class SharedTextureReceiverAlreadyBoundError extends Error {
+  override name = "SharedTextureReceiverAlreadyBoundError";
+  constructor() {
+    super(
+      "shared texture receiver is already bound to this target; dispose() the existing binding before binding again",
+    );
+  }
+}
+
+/** `consume()` was called on a `BoundSharedTextureReceiver` after its `dispose()`. */
+export class SharedTextureReceiverDisposedError extends Error {
+  override name = "SharedTextureReceiverDisposedError";
+  constructor() {
+    super("shared texture receiver binding has been disposed; consume() is no longer available");
+  }
+}
