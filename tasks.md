@@ -12,4 +12,4 @@ Implementation plans that exist but are not yet completed.
 - [x] [forwardSharedTexture + forwardFrames + Multi-Receiver Grid](/Users/napochaan/ghq/github.com/naporin0624/electron-texture-bridge/docs/superpowers/plans/2026-08-13-forward-frames-multiviewer.md)
 - [x] [Push-based, Non-blocking Syphon Receive](/Users/napochaan/ghq/github.com/naporin0624/electron-texture-bridge/docs/superpowers/plans/2026-11-01-push-receive-zero-wait.md)
 - [ ] [bindSharedTextureReceiver — 副作用を明示する受信 API](/Users/napochaan/ghq/github.com/naporin0624/electron-texture-bridge/docs/superpowers/plans/2026-11-01-bind-shared-texture-receiver.md)
-- [ ] [Shared-Texture Receiver Fan-out](/Users/napochaan/ghq/github.com/naporin0624/electron-texture-bridge/docs/superpowers/plans/2026-11-02-receiver-fan-out.md)
+- [x] [Shared-Texture Receiver Fan-out](/Users/napochaan/ghq/github.com/naporin0624/electron-texture-bridge/docs/superpowers/plans/2026-11-02-receiver-fan-out.md)
