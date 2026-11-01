@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.16.0](https://github.com/naporin0624/electron-texture-bridge/compare/native-v0.15.0...native-v0.16.0) (2026-11-01)
+
+
+### Features
+
+* **native:** non-blocking push receive with a staging ring ([bb5b0fd](https://github.com/naporin0624/electron-texture-bridge/commit/bb5b0fdfb0884371e5e0393f766bdaa8a5525030))
+
+
+### Bug Fixes
+
+* **renderer:** close receiver handles after importSharedTexture ([7e06dcc](https://github.com/naporin0624/electron-texture-bridge/commit/7e06dccb20429d7ba0c8b2ebeeec38fbd5ace229))
+* **renderer:** close receiver handles after importSharedTexture ([6dfd396](https://github.com/naporin0624/electron-texture-bridge/commit/6dfd396be8c3d1151f3e0412a6f0653ae06c2a16))
+
+
+### Performance Improvements
+
+* **native:** add hot-path benchmark and before/after report ([88cfd14](https://github.com/naporin0624/electron-texture-bridge/commit/88cfd14bddb6ad9308f88ed1815acb12e1e334fa))
+* non-blocking push receive for shared textures (zero-copy) ([ca13d90](https://github.com/naporin0624/electron-texture-bridge/commit/ca13d90f0a2f945703821c3cacbbb80fca87ea72))
+
 ## [0.15.0](https://github.com/naporin0624/electron-texture-bridge/compare/native-v0.14.0...native-v0.15.0) (2026-08-14)
 
 
