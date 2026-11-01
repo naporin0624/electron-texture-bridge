@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.17.0](https://github.com/naporin0624/electron-texture-bridge/compare/renderer-v0.16.0...renderer-v0.17.0) (2026-11-01)
+
+
+### ⚠ BREAKING CHANGES
+
+* **renderer:** installSharedTextureReceiver and consumeSharedTexture are removed from @napolab/texture-bridge-renderer/client. Migrate with:
+
+### Features
+
+* **renderer:** fan out one shared-texture receive to many targets with forwardFrames ([7859db6](https://github.com/naporin0624/electron-texture-bridge/commit/7859db6ca5b128fd69f1317de6eda0fa7ee6b05c))
+* **renderer:** replace installSharedTextureReceiver with bindSharedTextureReceiver ([67f5224](https://github.com/naporin0624/electron-texture-bridge/commit/67f522423538eb75d9ac40e89d55ef2ae5c6c900))
+
+
+### Performance Improvements
+
+* fan out one shared-texture receive to many targets (forwardFrames) ([b0f4d99](https://github.com/naporin0624/electron-texture-bridge/commit/b0f4d99a2bc87ca74b48f6fb877f08f8456e39cd))
+* **renderer:** add end-to-end latency bench and fan-out before/after report ([20b71b9](https://github.com/naporin0624/electron-texture-bridge/commit/20b71b94c4e513138541cbefae518cee9c33ccb4))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @napolab/texture-bridge-core bumped to 0.17.0
+
 ## [0.16.0](https://github.com/naporin0624/electron-texture-bridge/compare/renderer-v0.15.0...renderer-v0.16.0) (2026-11-01)
 
 
