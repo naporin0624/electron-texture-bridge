@@ -134,7 +134,7 @@ export type ForwardStatusEvent = ForwardStatus & { readonly extraArgs: readonly 
 
 /** Options for {@link TextureBridge.forwardFrames} */
 export interface FrameForwardOptions {
-  /** consumeSharedTexture の handler に varargs で届くタグ(例: slot 番号) */
+  /** `bindSharedTextureReceiver(...).consume()` の handler に varargs で届くタグ(例: slot 番号) */
   readonly extraArgs?: readonly unknown[];
   /**
    * この登録の配信状態が変わったときだけ呼ばれる。`forwardStatus` イベントと
@@ -197,7 +197,7 @@ export interface TextureBridge {
    * `"error"` event and never stop the stream — they are reported as state
    * transitions through the `forwardStatus` event and
    * {@link FrameForwardOptions.onStatus} — the receiving end is
-   * `installSharedTextureReceiver` / `consumeSharedTexture` on
+   * `bindSharedTextureReceiver(sharedTexture).consume()` on
    * `@napolab/texture-bridge-renderer/client`. Call `dispose()` on the
    * returned {@link FrameForward} to stop forwarding to that target
    * (idempotent).

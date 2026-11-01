@@ -1,12 +1,18 @@
 import type { MainToWorkerMessage } from "./worker-protocol";
 
 export type { MainToWorkerMessage, WorkerToMainMessage, WorkerMessage } from "./worker-protocol";
-export { consumeSharedTexture, installSharedTextureReceiver } from "./shared-texture-consumer";
+export { bindSharedTextureReceiver } from "./shared-texture-consumer";
 export type {
+  BoundSharedTextureReceiver,
+  SharedTextureReceiverTarget,
   SharedTextureConsumerFrame,
   SharedTextureConsumerHandlers,
   SharedTextureConsumerRegistration,
 } from "./shared-texture-consumer";
+export {
+  SharedTextureReceiverAlreadyBoundError,
+  SharedTextureReceiverDisposedError,
+} from "../errors";
 export { createMultiDispatcher } from "./multi-dispatcher";
 export type {
   MultiDispatcher,

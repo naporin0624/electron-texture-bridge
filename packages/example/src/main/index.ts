@@ -165,7 +165,7 @@ const bootstrap = async (): Promise<void> => {
     // Receiver window needs `nodeIntegration: true` + `contextIsolation: false`
     // so the bundled renderer module can import
     // `@napolab/texture-bridge-renderer/client` and call
-    // `installSharedTextureReceiver` / `consumeSharedTexture` directly. This is
+    // `bindSharedTextureReceiver(sharedTexture)` / `.consume()` directly. This is
     // acceptable for an in-repo demo; production apps should keep isolation on
     // and forward frames via a preload bridge.
     const receiverWindow = new BrowserWindow({
@@ -247,7 +247,7 @@ const bootstrap = async (): Promise<void> => {
   // Same rationale as the receiver window: `nodeIntegration: true` +
   // `contextIsolation: false` lets the bundled renderer module import
   // `@napolab/texture-bridge-renderer/client` and call
-  // `installSharedTextureReceiver` / `consumeSharedTexture` directly. This is
+  // `bindSharedTextureReceiver(sharedTexture)` / `.consume()` directly. This is
   // acceptable for an in-repo demo; production apps should keep isolation on
   // and forward frames via a preload bridge.
   const multiviewerWindow = new BrowserWindow({

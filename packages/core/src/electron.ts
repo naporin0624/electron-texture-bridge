@@ -61,7 +61,7 @@ export const sendImportedTexture = async (
  * a {@link ForwardDefect} describing why it was not. Never throws
  * synchronously (async function), and never swallows: callers own the
  * decision to log, count, or ignore. The renderer receives the frame through
- * `installSharedTextureReceiver` / `consumeSharedTexture` (from
+ * `bindSharedTextureReceiver(sharedTexture).consume(...)` (from
  * `@napolab/texture-bridge-renderer/client`), with `extraArgs` forwarded
  * verbatim to the consumer handler.
  */

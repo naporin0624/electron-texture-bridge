@@ -10,4 +10,5 @@ Implementation plans that exist but are not yet completed.
 - [x] [DI Seam + Sync Dispose + Package Docs](/Users/napochaan/ghq/github.com/naporin0624/electron-texture-bridge/docs/superpowers/plans/2026-08-12-di-seam-sync-dispose-docs.md)
 - [x] [Refactor Stack Revival (旧 #58–#64 → 新 5 PR)](/Users/napochaan/ghq/github.com/naporin0624/electron-texture-bridge/docs/superpowers/plans/2026-08-12-refactor-stack-revival.md)
 - [x] [forwardSharedTexture + forwardFrames + Multi-Receiver Grid](/Users/napochaan/ghq/github.com/naporin0624/electron-texture-bridge/docs/superpowers/plans/2026-08-13-forward-frames-multiviewer.md)
-- [ ] [Push-based, Non-blocking Syphon Receive](/Users/napochaan/ghq/github.com/naporin0624/electron-texture-bridge/docs/superpowers/plans/2026-11-01-push-receive-zero-wait.md)
+- [x] [Push-based, Non-blocking Syphon Receive](/Users/napochaan/ghq/github.com/naporin0624/electron-texture-bridge/docs/superpowers/plans/2026-11-01-push-receive-zero-wait.md)
+- [ ] [bindSharedTextureReceiver — 副作用を明示する受信 API](/Users/napochaan/ghq/github.com/naporin0624/electron-texture-bridge/docs/superpowers/plans/2026-11-01-bind-shared-texture-receiver.md)

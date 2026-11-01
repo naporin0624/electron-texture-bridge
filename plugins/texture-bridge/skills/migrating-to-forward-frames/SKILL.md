@@ -28,7 +28,7 @@ const forward = deck.bridge.forwardFrames(previewWindow.webContents, {
 
 The option is `extraArgs` (an array). There is no `sourceId`, `channel`, or `maxFps` option. The handle's cleanup method is `dispose()`, not `stop()` or `unsubscribe()`.
 
-**Add (receiver):** the preview window consumes exactly like any shared-texture receiver — `installSharedTextureReceiver()` once + `consumeSharedTexture({ onFrame: (frame, deckIndex) => ... })`, both imported from `@napolab/texture-bridge-renderer/client` (the `/client` subpath — the package root exports the main-process API only), in a preload, window running `nodeIntegration: true, contextIsolation: false, sandbox: false`. Full recipe (frame cloning, coalescing, rAF, cleanup): see the receiving-shared-textures skill.
+**Add (receiver):** the preview window consumes exactly like any shared-texture receiver — `const receiver = bindSharedTextureReceiver(sharedTexture)` once (`sharedTexture` from `electron`) + `receiver.consume({ onFrame: (frame, deckIndex) => ... })`, with `bindSharedTextureReceiver` imported from `@napolab/texture-bridge-renderer/client` (the `/client` subpath — the package root exports the main-process API only), in a preload, window running `nodeIntegration: true, contextIsolation: false, sandbox: false`. Full recipe (frame cloning, coalescing, rAF, cleanup): see the receiving-shared-textures skill.
 
 ## Path B: manual paint wiring → forwardSharedTexture
 

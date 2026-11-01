@@ -41,7 +41,7 @@ If the upgrade cannot land immediately, the surviving seams are coarse and none 
 | `false` | none | Registration was refused — the bridge was disposed or the target already destroyed. The caller is holding a dead handle it believes is live | the call site: re-register against the current `WebContents` after a window is recreated |
 | `true` | nothing, ever | Paint never reached this entry | is the source painting at all? (see below) — then the registration's own lifecycle |
 | `true` → `false` | ends abruptly | The entry was pruned: target destroyed, `dispose()`, or the bridge disposed | whoever tore it down — an unpaired `detach()`, a rebuild that never re-added it |
-| `true` | `ok`, then nothing | The library is delivering. Stop looking at the bridge | the renderer: `installSharedTextureReceiver` present? consumer registered? `VideoFrame` drawn? |
+| `true` | `ok`, then nothing | The library is delivering. Stop looking at the bridge | the renderer: `bindSharedTextureReceiver(sharedTexture)` called (and not disposed)? consumer registered via `receiver.consume`? `VideoFrame` drawn? |
 | `true` | `target-destroyed` | Target died under the registration | re-register after the window is recreated |
 | `true` | `import-failed` / `send-failed` | GPU or IPC layer refused the frame; `cause` carries the error | the `cause`, then GPU/handle pressure |
 

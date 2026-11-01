@@ -3,7 +3,7 @@
 There are two receive paths, and they solve different problems:
 
 - **`TextureReceiver.receiveFrame()` / `createTextureReceiver()`** — RGBA readback. The native side performs a GPU→CPU blit (D3D11 staging / Metal blit), then hands you an `ArrayBuffer` via an IPC hop. Roughly ~8 MB per 1080p frame copied through IPC. Use it when you actually want pixel data in JavaScript (analysis, image export, custom color pipelines).
-- **`TextureReceiver.receiveSharedTexture()` / `createSharedTextureReceiver()` / `consumeSharedTexture()`** — zero-copy GPU delivery. The native side mints a platform-native shared handle (DXGI NT handle on Windows, IOSurface pointer on macOS) per frame and passes it through Electron's `sharedTexture.importSharedTexture` + `sendSharedTexture` pair into the renderer as a `VideoFrame`. No CPU readback, no ArrayBuffer IPC copy. `ctx.drawImage(videoFrame, 0, 0)` stays on the GPU and `GPUDevice.importExternalTexture({ source: videoFrame })` exposes the same texture to WebGPU without a copy. Use it when you just want to display or GPU-process the incoming video.
+- **`TextureReceiver.receiveSharedTexture()` / `createSharedTextureReceiver()` / `bindSharedTextureReceiver()`** — zero-copy GPU delivery. The native side mints a platform-native shared handle (DXGI NT handle on Windows, IOSurface pointer on macOS) per frame and passes it through Electron's `sharedTexture.importSharedTexture` + `sendSharedTexture` pair into the renderer as a `VideoFrame`. No CPU readback, no ArrayBuffer IPC copy. `ctx.drawImage(videoFrame, 0, 0)` stays on the GPU and `GPUDevice.importExternalTexture({ source: videoFrame })` exposes the same texture to WebGPU without a copy. Use it when you just want to display or GPU-process the incoming video.
 
 Pick whichever matches what you will do with the frame.
 
@@ -56,24 +56,23 @@ In `mode: "push"` (the default on macOS / Windows) the native side stages each n
 - **macOS:** a slot is skipped while its `IOSurfaceRef` is retained beyond the ring's own reference **or** `IOSurfaceIsInUse` reports it in use. Electron's import does not show up in `CFGetRetainCount`, so in practice `IOSurfaceIsInUse` is what protects a slot the renderer is still sampling. When all 3 slots are in use the frame is dropped natively (logged as "all 3 ring slots still held downstream").
 - **Windows:** a slot counts as held only while the NT handle handed out for it is still open (`CompareObjectHandles`). Because the bridge closes it right after import, the check effectively always sees the slot free, so the ring degrades to round-robin over its 3 slots — it cannot detect a slot the renderer still holds. That is still strictly better than the single staging texture the poll path reuses every frame. On Windows older than 10 1607 (no `CompareObjectHandles`) a handed-out slot is treated as held forever, so push delivery stops after 3 frames; use `mode: "poll"` there.
 
-## Renderer process: `installSharedTextureReceiver` + `consumeSharedTexture`
+## Renderer process: `bindSharedTextureReceiver` + `receiver.consume`
 
 ```typescript
 // renderer process (or preload with nodeIntegration: true, contextIsolation: false)
-import {
-  installSharedTextureReceiver,
-  consumeSharedTexture,
-} from "@napolab/texture-bridge-renderer/client";
+import { sharedTexture } from "electron";
+import { bindSharedTextureReceiver } from "@napolab/texture-bridge-renderer/client";
 
 // Call once at startup. Binds Electron's single
-// sharedTexture.setSharedTextureReceiver slot to an internal pool so multiple
-// consumers can coexist. Idempotent.
-installSharedTextureReceiver();
+// sharedTexture.setSharedTextureReceiver slot to a pool so multiple consumers
+// can coexist. Binding the same sharedTexture twice (without dispose) throws
+// SharedTextureReceiverAlreadyBoundError.
+const receiver = bindSharedTextureReceiver(sharedTexture);
 
 const canvas = document.getElementById("canvas") as HTMLCanvasElement;
 const ctx = canvas.getContext("2d")!;
 
-const registration = consumeSharedTexture({
+const registration = receiver.consume({
   onFrame: ({ textureId, videoFrame }) => {
     if (canvas.width !== videoFrame.displayWidth) canvas.width = videoFrame.displayWidth;
     if (canvas.height !== videoFrame.displayHeight) canvas.height = videoFrame.displayHeight;
@@ -84,9 +83,12 @@ const registration = consumeSharedTexture({
 });
 
 // registration.dispose();  // optional — removes this consumer from the pool
+// receiver.dispose();      // optional — tears the binding down (idempotent)
 ```
 
 `videoFrame` is a standard Web `VideoFrame`. For WebGPU, hand it to `device.importExternalTexture({ source: videoFrame })` instead of `drawImage` — that path is also zero-copy. You do **not** need to call `videoFrame.close()` yourself; the consumer wrapper closes it after your handler's returned promise settles.
+
+`receiver.dispose()` drops every consumer and lets the same `sharedTexture` be bound again; calling `receiver.consume()` after that throws `SharedTextureReceiverDisposedError`. Electron has no way to unset the receiver slot, so the installed callback keeps draining and releasing frames that still arrive. See [API Reference](API.md#bindsharedtexturereceiversharedtexture-from-rendererclient) for details.
 
 ## Optional: polling `TextureReceiver.receiveSharedTexture()` directly
 
@@ -138,6 +140,6 @@ For continuous change notifications, use `SenderDiscovery` (see [API Reference](
 
 Electron's `sharedTexture` module is only accessible from the main and renderer processes that have `electron` resolvable at runtime. Importing `@napolab/texture-bridge-renderer/client` directly from a Vite-driven renderer can fail during dev pre-bundle (`path.join is not a function`), because Vite cannot pre-bundle the `electron` CJS module. Two ways out:
 
-1. **Recommended for simple cases:** put `installSharedTextureReceiver()` and `consumeSharedTexture()` in a **preload script** (bundled by electron-vite / electron-builder with `externalizeDepsPlugin`), and run the receiver window with `nodeIntegration: true, contextIsolation: false`. The example app does this — see [`packages/example/src/preload/receiver.ts`](../packages/example/src/preload/receiver.ts).
+1. **Recommended for simple cases:** put `bindSharedTextureReceiver(sharedTexture)` and `receiver.consume()` in a **preload script** (bundled by electron-vite / electron-builder with `externalizeDepsPlugin`), and run the receiver window with `nodeIntegration: true, contextIsolation: false`. The example app does this — see [`packages/example/src/preload/receiver.ts`](../packages/example/src/preload/receiver.ts).
 2. **Context-isolated setups:** bind the consumer in the preload, then forward each `VideoFrame` to the isolated renderer world via `window.postMessage(videoFrame, "*", [videoFrame])` (the `VideoFrame` is a transferable). Close it on the renderer side after use.
 

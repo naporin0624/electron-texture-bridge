@@ -152,7 +152,7 @@ app.whenReady().then(() => {
 });
 ```
 
-この例は **RGBA readback** 経路を使用しています。**ゼロコピー GPU** 経路（`createSharedTextureReceiver`、`consumeSharedTexture`、レンダラーのコンテキスト分離）については **[docs/ja/RECEIVING.md](../../docs/ja/RECEIVING.md)** を参照してください。
+この例は **RGBA readback** 経路を使用しています。**ゼロコピー GPU** 経路（`createSharedTextureReceiver`、`bindSharedTextureReceiver`、レンダラーのコンテキスト分離）については **[docs/ja/RECEIVING.md](../../docs/ja/RECEIVING.md)** を参照してください。
 
 ## どの API を使うべきか
 
@@ -329,7 +329,7 @@ pnpm --filter @napolab/texture-bridge-example run build:win
 |----------|--------------|
 | [docs/ja/INSTALLATION.md](../../docs/ja/INSTALLATION.md) | 前提条件、ソースからのビルド、アプリへの統合、パッケージング、検証 |
 | [docs/ja/SENDING.md](../../docs/ja/SENDING.md) | 外部ページのキャプチャ、`includeAlpha` による透過、低レベル core の paint ループ、Retina/DPI の正確な扱い、Electron 無しのサニティチェック、electron-vite（ESM） |
-| [docs/ja/RECEIVING.md](../../docs/ja/RECEIVING.md) | 2 つの受信経路、`createSharedTextureReceiver`、`installSharedTextureReceiver` / `consumeSharedTexture`、ハンドルの所有権、レンダラーのコンテキスト分離 |
+| [docs/ja/RECEIVING.md](../../docs/ja/RECEIVING.md) | 2 つの受信経路、`createSharedTextureReceiver`、`bindSharedTextureReceiver` / `receiver.consume`、ハンドルの所有権、レンダラーのコンテキスト分離 |
 | [docs/ja/API.md](../../docs/ja/API.md) | 3 パッケージすべてのエクスポートシンボルの完全な API リファレンス |
 | [docs/ja/TROUBLESHOOTING.md](../../docs/ja/TROUBLESHOOTING.md) | 黒画面、paint イベントが発火しない、フリーズ、プラットフォームごとのレシーバー問題 |
 | [docs/ja/MIGRATION.md](../../docs/ja/MIGRATION.md) | Electron 42 / OSR デバイススケール、同期的な dispose（v0.14+）、明示的な破棄（v0.6+） |
