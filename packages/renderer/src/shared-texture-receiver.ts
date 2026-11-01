@@ -1,9 +1,11 @@
 /**
  * Shared-texture (zero-copy GPU) receiver bridge.
  *
- * Polls the native addon's `receiveSharedTexture()` and forwards each frame to
- * a target renderer via Electron's `sharedTexture.importSharedTexture` +
- * `sendSharedTexture` pair (available in Electron 40+).
+ * Receives frames from the native addon — pushed via `onSharedTexture()`
+ * (`mode: "push"`) or polled via `receiveSharedTexture()` (`mode: "poll"`) —
+ * and forwards each one to a target renderer via Electron's
+ * `sharedTexture.importSharedTexture` + `sendSharedTexture` pair (available
+ * in Electron 40+).
  *
  * Main process only.
  */
@@ -77,17 +79,71 @@ const safeReceiveSharedTexture = Result.fromThrowable(
   (cause) => new FrameReceiveError(toError(cause).message, { cause }),
 );
 
+const safeSubscribeSharedTexture = Result.fromThrowable(
+  (receiver: InstanceType<typeof TextureReceiver>, callback: (frame: SharedTextureFrame) => void) =>
+    receiver.onSharedTexture(callback),
+  (cause) => new FrameReceiveError(toError(cause).message, { cause }),
+);
+
+/**
+ * Drop the native push subscription. Must always run on stop/dispose — while
+ * subscribed, the native threadsafe function keeps the event loop alive. A
+ * throw here (receiver already stopped) leaves nothing to release, so it is
+ * logged and swallowed like `releaseNativeHandle`.
+ */
+const unsubscribeSharedTexture = (receiver: InstanceType<typeof TextureReceiver>): void => {
+  try {
+    receiver.onSharedTexture(null);
+  } catch (unsubscribeErr) {
+    console.error("[shared-texture] onSharedTexture(null) threw:", unsubscribeErr);
+  }
+};
+
 const safeImportSharedTexture = Result.fromThrowable(
   (textureInfo: Electron.SharedTextureImportTextureInfo) =>
     sharedTexture.importSharedTexture({ textureInfo }),
   (cause) => new TextureImportError(toError(cause).message, { cause }),
 );
 
+/**
+ * How the bridge obtains frames from the native receiver.
+ *
+ * - `"push"`: the native side stages each frame on the GPU as soon as the
+ *   sender publishes it and calls back on the JS thread — no per-frame
+ *   synchronous GPU wait, no poll latency. Delivery is latest-wins: while a
+ *   send is in flight only the newest pushed frame is kept, older ones are
+ *   released.
+ * - `"poll"`: a `setInterval` calls `receiveSharedTexture()` every
+ *   `pollIntervalMs`; ticks that land while a send is in flight are dropped.
+ */
+export type SharedTextureReceiveMode = "push" | "poll";
+
+/** Push where the native addon supports it (Syphon / Spout), poll elsewhere. */
+const resolveDefaultMode = (platform: NodeJS.Platform): SharedTextureReceiveMode => {
+  switch (platform) {
+    case "darwin":
+    case "win32":
+      return "push";
+    default:
+      return "poll";
+  }
+};
+
 export interface SharedTextureReceiverOptions {
   readonly senderName: string;
   readonly appName?: string;
   readonly serverUuid?: string;
-  /** Polling interval in ms. Defaults to 16 (~60 fps). */
+  /**
+   * Frame acquisition mode. Defaults to `"push"` on macOS and Windows,
+   * `"poll"` elsewhere. If subscribing to pushed frames fails at `start()`,
+   * the bridge emits the `FrameReceiveError` on `"error"` and falls back to
+   * polling.
+   */
+  readonly mode?: SharedTextureReceiveMode;
+  /**
+   * Polling interval in ms. Defaults to 16 (~60 fps). Only used in `"poll"`
+   * mode (including the push-subscription fallback); ignored while pushing.
+   */
   readonly pollIntervalMs?: number;
   /**
    * Target WebContents to deliver frames to. The bridge forwards to
@@ -160,19 +216,25 @@ class SharedTextureReceiverBridgeImpl extends EventEmitter implements SharedText
   private _timer: ReturnType<typeof setInterval> | null = null;
   private _inFlight = false;
   private _consecutiveErrors = 0;
+  private _subscribed = false;
+  /** Push mode: newest frame that arrived while a send was in flight. */
+  private _pending: SharedTextureFrame | null = null;
   private pollIntervalMs: number;
+  private mode: SharedTextureReceiveMode;
 
   constructor(
     receiver: InstanceType<typeof TextureReceiver>,
     target: WebContents,
     extraArgs: readonly unknown[],
     pollIntervalMs: number,
+    mode: SharedTextureReceiveMode,
   ) {
     super();
     this.receiver = receiver;
     this.target = target;
     this.extraArgs = extraArgs;
     this.pollIntervalMs = pollIntervalMs;
+    this.mode = mode;
   }
 
   get isDisposed(): boolean {
@@ -184,17 +246,25 @@ class SharedTextureReceiverBridgeImpl extends EventEmitter implements SharedText
     this._started = true;
     this._consecutiveErrors = 0;
     this.fpsCounter.reset();
-    this._timer = setInterval(() => {
-      void this._tick();
-    }, this.pollIntervalMs);
+    switch (this.mode) {
+      case "push":
+        this._startPush();
+        return;
+      case "poll":
+        this._startPolling();
+        return;
+      default: {
+        const _exhaustive: never = this.mode;
+        throw new Error(`unhandled receive mode: ${JSON.stringify(_exhaustive)}`);
+      }
+    }
   }
 
   stop(): void {
     this._started = false;
-    if (this._timer) {
-      clearInterval(this._timer);
-      this._timer = null;
-    }
+    this._stopPolling();
+    this._stopPush();
+    this._dropPending();
   }
 
   dispose(): void {
@@ -213,6 +283,83 @@ class SharedTextureReceiverBridgeImpl extends EventEmitter implements SharedText
   setFlipY(flip: boolean): void {
     if (this._disposed) return;
     this.receiver.setFlipY(flip);
+  }
+
+  private _startPolling(): void {
+    this._timer = setInterval(() => {
+      void this._tick();
+    }, this.pollIntervalMs);
+  }
+
+  private _stopPolling(): void {
+    if (!this._timer) return;
+    clearInterval(this._timer);
+    this._timer = null;
+  }
+
+  /**
+   * Subscribe to native pushed frames — the single consumer of
+   * `_subscribePush()`'s `Result`. A subscription failure (e.g. a native
+   * build without push support) is surfaced on `"error"` and the bridge
+   * falls back to polling so frames keep flowing.
+   */
+  private _startPush(): void {
+    this._subscribePush().match(
+      () => {
+        this._subscribed = true;
+      },
+      (error) => {
+        // Start the fallback before emitting: an unhandled "error" throws,
+        // and the bridge must not be left started-but-dead.
+        this._startPolling();
+        this.emit("error", error);
+      },
+    );
+  }
+
+  private _subscribePush(): Result<void, FrameReceiveError> {
+    return safeSubscribeSharedTexture(this.receiver, (frame) => this._onPushedFrame(frame));
+  }
+
+  private _stopPush(): void {
+    if (!this._subscribed) return;
+    this._subscribed = false;
+    unsubscribeSharedTexture(this.receiver);
+  }
+
+  /** Release the handle of the pending pushed frame, if any. */
+  private _dropPending(): void {
+    if (!this._pending) return;
+    releaseNativeHandle(this._pending.handle);
+    this._pending = null;
+  }
+
+  /**
+   * Native push callback (JS thread). Latest-wins: while a send is in flight
+   * the frame replaces (and releases) any older pending frame; otherwise it
+   * is delivered immediately. Every handle is released exactly once via
+   * `releaseNativeHandle` — right after its import attempt (`_prepare`), or
+   * unimported when it is superseded, dropped, or arrives after stop.
+   */
+  private _onPushedFrame(frame: SharedTextureFrame): void {
+    if (this._disposed || !this._started) {
+      releaseNativeHandle(frame.handle);
+      return;
+    }
+    if (this._inFlight) {
+      this._dropPending();
+      this._pending = frame;
+      return;
+    }
+    void this._deliverFrame(frame);
+  }
+
+  /** Push mode: after a delivery settles, send the frame that queued behind it. */
+  private _deliverPending(): void {
+    const next = this._pending;
+    if (!next) return;
+    this._pending = null;
+    void this._deliverFrame(next);
   }
 
   /**
@@ -241,12 +388,9 @@ class SharedTextureReceiverBridgeImpl extends EventEmitter implements SharedText
   }
 
   /**
-   * One poll tick — the single consumer of both `_receiveFrame()`'s and
-   * `_send()`'s `Result` values; each `.match()` here is the one place a
-   * pipeline value crosses from the `Result` channel into `"error"` emits /
-   * circuit-breaker bookkeeping. Producers (`_receiveFrame`, `_send`,
-   * `_prepare`, `_deliver`) only ever return `Result`/`ResultAsync` — they
-   * never emit or consume themselves.
+   * One poll tick — the single consumer of `_receiveFrame()`'s `Result`.
+   * Producers (`_receiveFrame`, `_send`, `_prepare`, `_deliver`) only ever
+   * return `Result`/`ResultAsync` — they never emit or consume themselves.
    *
    * Drop-latest: if a previous send is still in flight (the Electron
    * `sendSharedTexture` Promise has not resolved yet), this tick is a no-op.
@@ -255,8 +399,7 @@ class SharedTextureReceiverBridgeImpl extends EventEmitter implements SharedText
    *
    * Receive errors are consumed synchronously (same-tick circuit-breaker
    * accounting — matches the pre-neverthrow behavior); send/prepare/deliver
-   * errors are consumed after the `await` — one microtask later than the
-   * pre-neverthrow code, an already-accepted contract (see `_send`).
+   * errors are consumed by `_deliverFrame` after the `await`.
    */
   private async _tick(): Promise<void> {
     if (this._disposed || this._inFlight) return;
@@ -270,6 +413,17 @@ class SharedTextureReceiverBridgeImpl extends EventEmitter implements SharedText
     );
     if (!frame) return;
 
+    await this._deliverFrame(frame);
+  }
+
+  /**
+   * Send one frame and consume the outcome — shared by the poll tick and the
+   * push callback, and the single consumer of `_send()`'s `Result`: the
+   * `.match()` here is the one place a send outcome crosses into `"error"`
+   * emits / FPS / circuit-breaker bookkeeping. In push mode it then hands
+   * off to the frame that queued behind this one (latest-wins).
+   */
+  private async _deliverFrame(frame: SharedTextureFrame): Promise<void> {
     const sent = await this._sendTracked(frame);
 
     if (this._disposed) return;
@@ -298,6 +452,8 @@ class SharedTextureReceiverBridgeImpl extends EventEmitter implements SharedText
         this._recordTickError(error);
       },
     );
+
+    this._deliverPending();
   }
 
   /**
@@ -425,8 +581,10 @@ type SendResult = "delivered" | "skipped";
 /**
  * Create a shared-texture receiver bridge.
  *
- * The returned bridge polls Spout/Syphon at `pollIntervalMs` and delivers each
- * frame as a GPU-shared texture to `options.target`'s renderer. The renderer
+ * The returned bridge receives Spout/Syphon frames — pushed by the native side
+ * (`mode: "push"`, default on macOS / Windows) or polled every
+ * `pollIntervalMs` (`mode: "poll"`) — and delivers each frame as a GPU-shared
+ * texture to `options.target`'s renderer. The renderer
  * must register a handler via `consumeSharedTexture` from
  * `@napolab/texture-bridge-renderer/client`.
  *
@@ -440,7 +598,9 @@ type SendResult = "delivered" | "skipped";
  * arrives on `"error"` as `FrameReceiveError`, `TextureImportError`,
  * `TextureDeliveryError`, `UnsupportedPixelFormatError`, or
  * `ReceiverStoppedError` (emitted after 10 consecutive failures, which stops
- * the poll timer without disposing the bridge).
+ * the poll timer / push subscription without disposing the bridge). In push
+ * mode a failed subscription at `start()` is also emitted as
+ * `FrameReceiveError`, after which the bridge falls back to polling.
  *
  * @experimental Requires Electron 40+ `sharedTexture` module.
  */
@@ -452,6 +612,7 @@ export const createSharedTextureReceiver = (
     appName,
     serverUuid,
     pollIntervalMs = 16,
+    mode = resolveDefaultMode(process.platform),
     target,
     extraArgs = [],
     flipY,
@@ -467,5 +628,5 @@ export const createSharedTextureReceiver = (
   if (flipY !== undefined) {
     receiver.setFlipY(flipY);
   }
-  return new SharedTextureReceiverBridgeImpl(receiver, target, extraArgs, pollIntervalMs);
+  return new SharedTextureReceiverBridgeImpl(receiver, target, extraArgs, pollIntervalMs, mode);
 };

@@ -12,6 +12,7 @@ const mockReceiver = {
   receiveSharedTexture: vi.fn<() => MockFrame | null>().mockReturnValue(null),
   stop: vi.fn(),
   setFlipY: vi.fn<(flip: boolean) => void>(),
+  onSharedTexture: vi.fn<(callback: ((frame: MockFrame) => void) | null) => void>(),
 };
 
 const mockImported = {
@@ -45,6 +46,7 @@ vi.mock("@napolab/texture-bridge-core", () => ({
     receiveSharedTexture = mockReceiver.receiveSharedTexture;
     stop = mockReceiver.stop;
     setFlipY = mockReceiver.setFlipY;
+    onSharedTexture = mockReceiver.onSharedTexture;
   },
   closeNativeHandle: (handle: Buffer) => mockCloseNativeHandle(handle),
 }));
@@ -76,8 +78,16 @@ const flushPromises = async () => {
   }
 };
 
+const originalPlatform = process.platform;
+const setPlatform = (p: NodeJS.Platform) => {
+  Object.defineProperty(process, "platform", { value: p, configurable: true });
+};
+
 describe("createSharedTextureReceiver", () => {
   beforeEach(() => {
+    // Pin a platform whose default mode is "poll" so the poll-path tests below
+    // behave the same on macOS / Windows / Linux CI runners.
+    setPlatform("linux");
     vi.useFakeTimers();
     vi.clearAllMocks();
     mockReceiver.receiveSharedTexture.mockReturnValue(null);
@@ -87,6 +97,7 @@ describe("createSharedTextureReceiver", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+    setPlatform(originalPlatform);
   });
 
   it("returns a bridge that is initially not disposed", () => {
@@ -173,11 +184,6 @@ describe("createSharedTextureReceiver", () => {
   });
 
   it("wraps handle under ntHandle on win32 and ioSurface on darwin", () => {
-    const originalPlatform = process.platform;
-    const setPlatform = (p: NodeJS.Platform) => {
-      Object.defineProperty(process, "platform", { value: p, configurable: true });
-    };
-
     try {
       setPlatform("win32");
       mockReceiver.receiveSharedTexture.mockReturnValue(makeFrame());
@@ -185,6 +191,7 @@ describe("createSharedTextureReceiver", () => {
         senderName: "w",
         target: makeMockTarget() as unknown as Electron.WebContents,
         pollIntervalMs: 10,
+        mode: "poll",
       });
       bridgeWin.start();
       vi.advanceTimersByTime(15);
@@ -202,6 +209,7 @@ describe("createSharedTextureReceiver", () => {
         senderName: "m",
         target: makeMockTarget() as unknown as Electron.WebContents,
         pollIntervalMs: 10,
+        mode: "poll",
       });
       bridgeMac.start();
       vi.advanceTimersByTime(15);
@@ -879,5 +887,346 @@ describe("createSharedTextureReceiver", () => {
 
       bridge.dispose();
     }
+  });
+});
+
+describe("createSharedTextureReceiver push mode", () => {
+  beforeEach(() => {
+    setPlatform("linux");
+    vi.useFakeTimers();
+    vi.clearAllMocks();
+    mockReceiver.receiveSharedTexture.mockReturnValue(null);
+    mockReceiver.onSharedTexture.mockImplementation(() => undefined);
+    mockImportSharedTexture.mockReturnValue(mockImported);
+    mockSendSharedTexture.mockResolvedValue(undefined);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    setPlatform(originalPlatform);
+  });
+
+  const makeTarget = () => makeMockTarget() as unknown as Electron.WebContents;
+
+  /** The callback most recently registered via `onSharedTexture(fn)`. */
+  const capturedCallback = (): ((frame: MockFrame) => void) => {
+    const registered = mockReceiver.onSharedTexture.mock.calls
+      .map(([callback]) => callback)
+      .filter((callback) => callback !== null);
+    const last = registered.at(-1);
+    if (!last) throw new Error("onSharedTexture was never called with a callback");
+    return last;
+  };
+
+  const makeHandle = (byte: number): Buffer => Buffer.alloc(8, byte);
+
+  /** Make `sendSharedTexture` hang until the returned resolvers are called. */
+  const deferSends = (): Array<() => void> => {
+    const resolvers: Array<() => void> = [];
+    mockSendSharedTexture.mockImplementation(
+      () =>
+        new Promise<void>((res) => {
+          resolvers.push(res);
+        }),
+    );
+    return resolvers;
+  };
+
+  it("push mode subscribes on start and unsubscribes on stop", () => {
+    const bridge = createSharedTextureReceiver({
+      senderName: "test",
+      target: makeTarget(),
+      mode: "push",
+    });
+    bridge.start();
+    expect(mockReceiver.onSharedTexture).toHaveBeenCalledTimes(1);
+    expect(mockReceiver.onSharedTexture.mock.calls[0][0]).toBeTypeOf("function");
+
+    vi.advanceTimersByTime(100);
+    expect(mockReceiver.receiveSharedTexture).not.toHaveBeenCalled();
+
+    bridge.stop();
+    expect(mockReceiver.onSharedTexture).toHaveBeenLastCalledWith(null);
+
+    bridge.dispose();
+  });
+
+  it("push mode delivers a pushed frame", async () => {
+    const bridge = createSharedTextureReceiver({
+      senderName: "test",
+      target: makeTarget(),
+      mode: "push",
+    });
+    bridge.start();
+
+    capturedCallback()(makeFrame());
+    await flushPromises();
+
+    expect(mockImportSharedTexture).toHaveBeenCalledTimes(1);
+    expect(mockSendSharedTexture).toHaveBeenCalledTimes(1);
+    expect(mockImported.release).toHaveBeenCalledTimes(1);
+
+    bridge.dispose();
+  });
+
+  it("push mode closes the native handle after a successful import", async () => {
+    const bridge = createSharedTextureReceiver({
+      senderName: "test",
+      target: makeTarget(),
+      mode: "push",
+    });
+    bridge.start();
+
+    const frame = makeFrame({ handle: makeHandle(0x7) });
+    capturedCallback()(frame);
+    await flushPromises();
+
+    expect(mockImportSharedTexture).toHaveBeenCalledTimes(1);
+    expect(mockCloseNativeHandle).toHaveBeenCalledTimes(1);
+    expect(mockCloseNativeHandle).toHaveBeenCalledWith(frame.handle);
+    const [importOrder] = mockImportSharedTexture.mock.invocationCallOrder;
+    const [closeOrder] = mockCloseNativeHandle.mock.invocationCallOrder;
+    expect(closeOrder).toBeGreaterThan(importOrder ?? Number.POSITIVE_INFINITY);
+
+    bridge.dispose();
+    // Nothing pending — dispose must not close the already-closed handle again.
+    expect(mockCloseNativeHandle).toHaveBeenCalledTimes(1);
+  });
+
+  it("push mode closes the native handle exactly once when importSharedTexture throws", async () => {
+    mockImportSharedTexture.mockImplementation(() => {
+      throw new Error("import boom");
+    });
+    const bridge = createSharedTextureReceiver({
+      senderName: "test",
+      target: makeTarget(),
+      mode: "push",
+    });
+    bridge.on("error", () => undefined);
+    bridge.start();
+
+    const frame = makeFrame({ handle: makeHandle(0x8) });
+    capturedCallback()(frame);
+    await flushPromises();
+
+    expect(mockCloseNativeHandle).toHaveBeenCalledTimes(1);
+    expect(mockCloseNativeHandle).toHaveBeenCalledWith(frame.handle);
+    expect(mockSendSharedTexture).not.toHaveBeenCalled();
+
+    bridge.dispose();
+  });
+
+  it("push mode keeps only the latest frame while a send is in flight", async () => {
+    const resolvers = deferSends();
+    const bridge = createSharedTextureReceiver({
+      senderName: "test",
+      target: makeTarget(),
+      mode: "push",
+    });
+    bridge.start();
+    const push = capturedCallback();
+
+    const frameA = makeFrame({ handle: makeHandle(0xa) });
+    const frameB = makeFrame({ handle: makeHandle(0xb) });
+    const frameC = makeFrame({ handle: makeHandle(0xc) });
+
+    push(frameA);
+    push(frameB);
+    push(frameC);
+    await flushPromises();
+
+    expect(mockImportSharedTexture).toHaveBeenCalledTimes(1);
+    // A: closed right after its import. B: superseded by C, closed unimported.
+    expect(mockCloseNativeHandle.mock.calls.map(([handle]) => handle)).toEqual([
+      frameA.handle,
+      frameB.handle,
+    ]);
+
+    resolvers[0]?.();
+    await flushPromises();
+
+    expect(mockImportSharedTexture).toHaveBeenCalledTimes(2);
+    expect(mockSendSharedTexture).toHaveBeenCalledTimes(2);
+    const secondImport = mockImportSharedTexture.mock.calls[1][0] as {
+      textureInfo: { handle: { ioSurface?: Buffer } };
+    };
+    expect(secondImport.textureInfo.handle.ioSurface).toBe(frameC.handle);
+    expect(mockCloseNativeHandle.mock.calls.map(([handle]) => handle)).toEqual([
+      frameA.handle,
+      frameB.handle,
+      frameC.handle,
+    ]);
+
+    resolvers[1]?.();
+    await flushPromises();
+    bridge.dispose();
+  });
+
+  it("push mode closes the pending frame handle on dispose", async () => {
+    deferSends();
+    const bridge = createSharedTextureReceiver({
+      senderName: "test",
+      target: makeTarget(),
+      mode: "push",
+    });
+    bridge.start();
+    const push = capturedCallback();
+    const pending = makeFrame({ handle: makeHandle(0xd) });
+
+    const first = makeFrame({ handle: makeHandle(0x1) });
+    push(first);
+    push(pending);
+    await flushPromises();
+    // Only the in-flight frame's handle is closed (after its import).
+    expect(mockCloseNativeHandle.mock.calls.map(([handle]) => handle)).toEqual([first.handle]);
+
+    bridge.dispose();
+
+    expect(mockCloseNativeHandle.mock.calls.map(([handle]) => handle)).toEqual([
+      first.handle,
+      pending.handle,
+    ]);
+    expect(mockReceiver.onSharedTexture).toHaveBeenLastCalledWith(null);
+  });
+
+  it("push mode closes the handle of a frame pushed after dispose", () => {
+    const bridge = createSharedTextureReceiver({
+      senderName: "test",
+      target: makeTarget(),
+      mode: "push",
+    });
+    bridge.start();
+    const push = capturedCallback();
+    bridge.dispose();
+
+    const late = makeFrame({ handle: makeHandle(0xe) });
+    push(late);
+
+    expect(mockImportSharedTexture).not.toHaveBeenCalled();
+    expect(mockCloseNativeHandle).toHaveBeenCalledWith(late.handle);
+  });
+
+  it("push mode unsubscribes when the circuit breaker trips", async () => {
+    mockImportSharedTexture.mockImplementation(() => {
+      throw new Error("import boom");
+    });
+    const errors: Error[] = [];
+    const bridge = createSharedTextureReceiver({
+      senderName: "test",
+      target: makeTarget(),
+      mode: "push",
+    });
+    bridge.on("error", (error) => errors.push(error));
+    bridge.start();
+    const push = capturedCallback();
+
+    for (const _ of Array.from({ length: 10 })) {
+      push(makeFrame());
+      await flushPromises();
+    }
+
+    expect(errors.at(-1)).toBeInstanceOf(ReceiverStoppedError);
+    expect(mockReceiver.onSharedTexture).toHaveBeenLastCalledWith(null);
+
+    bridge.dispose();
+  });
+
+  it("push mode emits 'error' and falls back to polling when subscribing throws", () => {
+    mockReceiver.onSharedTexture.mockImplementation(() => {
+      throw new Error("onSharedTexture is not supported on this platform");
+    });
+    const errors: Error[] = [];
+    const bridge = createSharedTextureReceiver({
+      senderName: "test",
+      target: makeTarget(),
+      mode: "push",
+      pollIntervalMs: 10,
+    });
+    bridge.on("error", (error) => errors.push(error));
+    bridge.start();
+
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toBeInstanceOf(FrameReceiveError);
+    vi.advanceTimersByTime(25);
+    expect(mockReceiver.receiveSharedTexture).toHaveBeenCalled();
+
+    bridge.dispose();
+  });
+
+  it("push mode still falls back to polling when subscribing throws and no 'error' listener is attached", () => {
+    mockReceiver.onSharedTexture.mockImplementation(() => {
+      throw new Error("onSharedTexture is not supported on this platform");
+    });
+    const bridge = createSharedTextureReceiver({
+      senderName: "test",
+      target: makeTarget(),
+      mode: "push",
+      pollIntervalMs: 10,
+    });
+
+    // EventEmitter throws on an unhandled "error"; the fallback must already
+    // be running by then, or the bridge is stuck started-but-dead.
+    expect(() => bridge.start()).toThrow();
+    vi.advanceTimersByTime(25);
+    expect(mockReceiver.receiveSharedTexture).toHaveBeenCalled();
+
+    bridge.dispose();
+  });
+
+  it("poll mode is unchanged", () => {
+    setPlatform("darwin");
+    const bridge = createSharedTextureReceiver({
+      senderName: "test",
+      target: makeTarget(),
+      mode: "poll",
+      pollIntervalMs: 20,
+    });
+    bridge.start();
+
+    vi.advanceTimersByTime(25);
+    expect(mockReceiver.receiveSharedTexture).toHaveBeenCalled();
+    expect(mockReceiver.onSharedTexture).not.toHaveBeenCalled();
+
+    bridge.dispose();
+  });
+
+  it("darwin defaults to push mode", () => {
+    setPlatform("darwin");
+    const bridge = createSharedTextureReceiver({ senderName: "test", target: makeTarget() });
+    bridge.start();
+    vi.advanceTimersByTime(100);
+
+    expect(mockReceiver.onSharedTexture.mock.calls[0]?.[0]).toBeTypeOf("function");
+    expect(mockReceiver.receiveSharedTexture).not.toHaveBeenCalled();
+
+    bridge.dispose();
+  });
+
+  it("win32 defaults to push mode", () => {
+    setPlatform("win32");
+    const bridge = createSharedTextureReceiver({ senderName: "test", target: makeTarget() });
+    bridge.start();
+    vi.advanceTimersByTime(100);
+
+    expect(mockReceiver.onSharedTexture.mock.calls[0]?.[0]).toBeTypeOf("function");
+    expect(mockReceiver.receiveSharedTexture).not.toHaveBeenCalled();
+
+    bridge.dispose();
+  });
+
+  it("other platforms default to poll mode", () => {
+    setPlatform("linux");
+    const bridge = createSharedTextureReceiver({
+      senderName: "test",
+      target: makeTarget(),
+      pollIntervalMs: 10,
+    });
+    bridge.start();
+    vi.advanceTimersByTime(25);
+
+    expect(mockReceiver.onSharedTexture).not.toHaveBeenCalled();
+    expect(mockReceiver.receiveSharedTexture).toHaveBeenCalled();
+
+    bridge.dispose();
   });
 });

@@ -211,7 +211,8 @@ Factory function that creates a **zero-copy GPU** receiver bridge. Polls `Textur
 interface SharedTextureReceiverOptions {
   senderName: string;                 // Syphon server / Spout sender name
   target: Electron.WebContents;       // Receiver window webContents
-  pollIntervalMs?: number;            // default 16 (~60 fps); drop-latest applied
+  mode?: "push" | "poll";             // default "push" on macOS/Windows, "poll" elsewhere; push is latest-wins
+  pollIntervalMs?: number;            // poll mode only; default 16 (~60 fps); drop-latest applied
   appName?: string;                   // (macOS only) filter by application name
   serverUuid?: string;                // (macOS only) connect by server UUID
   extraArgs?: readonly unknown[];     // forwarded to sendSharedTexture(..., ...args)

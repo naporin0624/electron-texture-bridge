@@ -28,7 +28,8 @@ app.whenReady().then(() => {
   const bridge = createSharedTextureReceiver({
     senderName: "Resolume Arena",   // required
     target: receiverWindow.webContents,
-    pollIntervalMs: 8,              // optional, defaults to 16
+    mode: "push",                   // optional, "push" (default on macOS/Windows) | "poll"
+    pollIntervalMs: 8,              // optional, poll mode only, defaults to 16
     appName: undefined,             // optional, macOS filter
     serverUuid: undefined,          // optional, macOS UUID
     extraArgs: [],                  // optional, forwarded to sendSharedTexture(..., ...args)
@@ -47,6 +48,13 @@ app.whenReady().then(() => {
 ```
 
 The bridge runs with a drop-latest policy: if a previous `sendSharedTexture` is still in flight when the next poll fires, the tick is skipped. This keeps at most one imported-texture reference alive on the main process and prevents frame pile-up when the renderer is slow.
+
+### Push mode and the staging ring
+
+In `mode: "push"` (the default on macOS / Windows) the native side stages each new sender frame into one of 3 receiver-owned GPU slots and calls back with that slot's handle; while a send is in flight the bridge keeps only the newest pushed frame (latest-wins). The bridge closes every handle right after `importSharedTexture` returns — Electron keeps its own reference — so a slot's "still held downstream" check cannot rely on the caller's handle:
+
+- **macOS:** a slot is skipped while its `IOSurfaceRef` is retained beyond the ring's own reference **or** `IOSurfaceIsInUse` reports it in use. Electron's import does not show up in `CFGetRetainCount`, so in practice `IOSurfaceIsInUse` is what protects a slot the renderer is still sampling. When all 3 slots are in use the frame is dropped natively (logged as "all 3 ring slots still held downstream").
+- **Windows:** a slot counts as held only while the NT handle handed out for it is still open (`CompareObjectHandles`). Because the bridge closes it right after import, the check effectively always sees the slot free, so the ring degrades to round-robin over its 3 slots — it cannot detect a slot the renderer still holds. That is still strictly better than the single staging texture the poll path reuses every frame. On Windows older than 10 1607 (no `CompareObjectHandles`) a handed-out slot is treated as held forever, so push delivery stops after 3 frames; use `mode: "poll"` there.
 
 ## Renderer process: `installSharedTextureReceiver` + `consumeSharedTexture`
 

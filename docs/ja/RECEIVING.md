@@ -28,7 +28,8 @@ app.whenReady().then(() => {
   const bridge = createSharedTextureReceiver({
     senderName: "Resolume Arena",   // required
     target: receiverWindow.webContents,
-    pollIntervalMs: 8,              // optional, defaults to 16
+    mode: "push",                   // optional, "push" (default on macOS/Windows) | "poll"
+    pollIntervalMs: 8,              // optional, poll mode only, defaults to 16
     appName: undefined,             // optional, macOS filter
     serverUuid: undefined,          // optional, macOS UUID
     extraArgs: [],                  // optional, forwarded to sendSharedTexture(..., ...args)
@@ -47,6 +48,13 @@ app.whenReady().then(() => {
 ```
 
 このブリッジは drop-latest ポリシーで動作します。前回の `sendSharedTexture` がまだ処理中の状態で次のポーリングが発火した場合、そのティックはスキップされます。これにより main プロセス側で保持される import 済みテクスチャ参照は常に最大 1 個に抑えられ、レンダラーの処理が遅い場合でもフレームが積み上がるのを防ぎます。
+
+### push モードとステージングリング
+
+`mode: "push"`（macOS / Windows の既定値）では、ネイティブ側がセンダーの新しいフレームをレシーバーが所有する 3 つの GPU スロットのいずれかにステージングし、そのスロットのハンドルでコールバックします。送信中に届いたフレームは最新の 1 つだけを保持します（latest-wins）。ブリッジは `importSharedTexture` が返った直後に毎回ハンドルを close します（Electron は自前の参照を持つため）。そのため、スロットが「下流でまだ使われているか」の判定に呼び出し側のハンドルは使えません。
+
+- **macOS:** `IOSurfaceRef` がリング自身の参照より多く retain されているか、`IOSurfaceIsInUse` が使用中を返す間、そのスロットは使いません。Electron の import は `CFGetRetainCount` に現れないため、実際にレンダラーがまだ参照しているスロットを守っているのは `IOSurfaceIsInUse` です。3 スロットすべてが使用中ならフレームはネイティブ側で破棄されます（"all 3 ring slots still held downstream" とログに出ます）。
+- **Windows:** スロットが使用中とみなされるのは、そのスロット用に渡した NT ハンドルがまだ開いている間だけです（`CompareObjectHandles`）。ブリッジは import 直後にハンドルを close するので、この判定は実質的に常に「空き」となり、リングは 3 スロットの単純なラウンドロビンになります。レンダラーがまだ参照しているスロットは検出できません。それでも、poll 経路が毎フレーム使い回す単一のステージングテクスチャよりは確実に良くなります。`CompareObjectHandles` のない Windows 10 1607 より前の環境では、一度渡したスロットがずっと使用中扱いになり、3 フレームで push 配信が止まります。その環境では `mode: "poll"` を使ってください。
 
 ## レンダラープロセス: `installSharedTextureReceiver` + `consumeSharedTexture`
 
