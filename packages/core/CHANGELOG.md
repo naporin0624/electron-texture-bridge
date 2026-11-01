@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.17.0](https://github.com/naporin0624/electron-texture-bridge/compare/core-v0.16.0...core-v0.17.0) (2026-11-01)
+
+
+### ⚠ BREAKING CHANGES
+
+* **renderer:** installSharedTextureReceiver and consumeSharedTexture are removed from @napolab/texture-bridge-renderer/client. Migrate with:
+
+### Features
+
+* **renderer:** replace installSharedTextureReceiver with bindSharedTextureReceiver ([67f5224](https://github.com/naporin0624/electron-texture-bridge/commit/67f522423538eb75d9ac40e89d55ef2ae5c6c900))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @napolab/texture-bridge bumped to 0.17.0
+
 ## [0.16.0](https://github.com/naporin0624/electron-texture-bridge/compare/core-v0.15.0...core-v0.16.0) (2026-11-01)
 
 

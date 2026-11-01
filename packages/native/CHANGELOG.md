@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.17.0](https://github.com/naporin0624/electron-texture-bridge/compare/native-v0.16.0...native-v0.17.0) (2026-11-01)
+
+
+### Bug Fixes
+
+* **native:** wait for in-flight Syphon publishes before stopping the sender ([efa352a](https://github.com/naporin0624/electron-texture-bridge/commit/efa352ab7c0382280ffd8a1bed0e064f039b88ea))
+* **native:** wait for in-flight Syphon publishes before stopping the sender ([21c00c6](https://github.com/naporin0624/electron-texture-bridge/commit/21c00c6bf336e83a549465622f51019f60e362d6))
+
 ## [0.16.0](https://github.com/naporin0624/electron-texture-bridge/compare/native-v0.15.0...native-v0.16.0) (2026-11-01)
 
 
