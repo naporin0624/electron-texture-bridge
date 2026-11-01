@@ -11,6 +11,7 @@ const mockImportSharedTexture = vi.fn();
 const mockSendSharedTexture = vi.fn();
 const mockIpcMainOn = vi.fn();
 const mockIpcMainRemoveListener = vi.fn();
+const mockBrowserWindowCtor = vi.fn();
 
 vi.mock("electron", () => {
   let nextWebContentsId = 1;
@@ -24,7 +25,8 @@ vi.mock("electron", () => {
     private _destroyed = false;
     private closedListeners: Array<() => void> = [];
 
-    constructor() {
+    constructor(options: unknown) {
+      mockBrowserWindowCtor(options);
       this.webContents = { id: nextWebContentsId++, mainFrame: { marker: "main-frame" } };
     }
 
@@ -155,6 +157,60 @@ describe("PreviewManager.sendFrame", () => {
     expect(sendArg.frame).toBe(win.webContents.mainFrame);
     expect(sendArg.importedSharedTexture).toBe(mockImported);
     expect(mockImported.release).toHaveBeenCalledTimes(1);
+
+    manager.dispose();
+  });
+});
+
+describe("PreviewManager window setup", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("opens the preview with an isolated, non-sandboxed preload (preload requires the client bundle)", () => {
+    const manager = new PreviewManager(1920, 1080);
+    manager.open();
+
+    expect(mockBrowserWindowCtor).toHaveBeenCalledTimes(1);
+    const [options] = mockBrowserWindowCtor.mock.calls[0] as [
+      { webPreferences: Record<string, unknown> },
+    ];
+    expect(options.webPreferences).toMatchObject({
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+    });
+    expect(`${options.webPreferences.preload}`).toMatch(/[\\/]assets[\\/]preview-preload\.js$/);
+
+    manager.dispose();
+  });
+
+  it("loads preview.html with the canvas size query", () => {
+    const manager = new PreviewManager(1280, 720);
+    manager.open();
+
+    const win = manager.window;
+    if (!win) throw new Error("expected window to be open");
+    expect(win.loadFile).toHaveBeenCalledWith(
+      expect.stringMatching(/[\\/]assets[\\/]preview\.html$/),
+      { query: { w: "1280", h: "720" } },
+    );
+
+    manager.dispose();
+  });
+
+  it("updateSize reloads preview.html with the new size (the preload rebinds on reload)", () => {
+    const manager = new PreviewManager(1920, 1080);
+    manager.open();
+
+    const win = manager.window;
+    if (!win) throw new Error("expected window to be open");
+    manager.updateSize(640, 480);
+
+    expect(win.loadFile).toHaveBeenLastCalledWith(
+      expect.stringMatching(/[\\/]assets[\\/]preview\.html$/),
+      { query: { w: "640", h: "480" } },
+    );
 
     manager.dispose();
   });
