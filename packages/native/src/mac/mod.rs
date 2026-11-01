@@ -88,3 +88,42 @@ pub fn close_shared_iosurface(raw_ptr: u64) -> Result<(), String> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Regression: `Sender::drop` used to call `-[SyphonMetalServer stop]` while
+    // Syphon's own completed handler for a just-committed publish was still
+    // running `-[SyphonServerConnectionManager publishNewFrame]` on a Metal
+    // completion thread. Stopping released the connection manager's dispatch
+    // queue under that `dispatch_sync`, crashing the process with SIGSEGV
+    // (completion thread) or SIGTRAP "Premature release of a locked queue"
+    // (stopping thread). A crash of the test binary is the failure signal.
+    //
+    // 720p rather than 4K on purpose: the small blit finishes on the GPU
+    // within the few hundred microseconds between commit and drop, so
+    // Syphon's handler is reliably mid-publish when `stop` runs (crashed
+    // every run pre-fix; 4K at 300 iterations only crashed ~1 run in 5).
+    #[test]
+    fn sender_drop_right_after_publish_does_not_crash() {
+        const WIDTH: u32 = 1280;
+        const HEIGHT: u32 = 720;
+        const ITERATIONS: usize = 500;
+        const SENDS_PER_SENDER: usize = 3;
+
+        let bytes_per_row = WIDTH * 4;
+        let frame = vec![0x7fu8; (bytes_per_row * HEIGHT) as usize];
+
+        for i in 0..ITERATIONS {
+            let sender =
+                Sender::new(&format!("etb-stop-race-test-{i}")).expect("create Syphon sender");
+            for _ in 0..SENDS_PER_SENDER {
+                sender
+                    .send_rgba(&frame, WIDTH, HEIGHT, bytes_per_row)
+                    .expect("publish RGBA frame");
+            }
+            drop(sender);
+        }
+    }
+}
