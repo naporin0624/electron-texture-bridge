@@ -504,6 +504,11 @@ export const createTextureBridgeWith =
     const renderWindow = deps.createWindow(
       buildBrowserWindowOptions({ ...options, ...dip }, policy),
     );
+    // Windows clamps a new window to its display, offscreen or not and whatever
+    // `enableLargerThanScreen` says: a 1920x1080 window created beside a portrait
+    // 1080x1920 display comes out 1080x1080, and so do its frames. Sizing it again
+    // after creation is not clamped, so the frames come out the size asked for.
+    renderWindow.setSize(dip.width, dip.height);
 
     // ---- Native sender ----
     const sender = deps.createSender(name, width, height);

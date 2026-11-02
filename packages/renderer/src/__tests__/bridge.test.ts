@@ -633,6 +633,19 @@ describe("createTextureBridgeWith — dependency injection seam", () => {
     expect(createSender).toHaveBeenCalledWith("test", 1280, 720);
   });
 
+  it("sizes the window again after creating it (Windows clamps a new window to its display)", async () => {
+    const createWindow = vi.fn(
+      (options: Electron.BrowserWindowConstructorOptions) => new BrowserWindow(options),
+    );
+    const createSender = vi.fn(
+      (name: string, width: number, height: number) => new TextureSender(name, width, height),
+    );
+
+    const bridge = await createTextureBridgeWith({ createWindow, createSender })(baseOpts);
+
+    expect(bridge.renderWindow.setSize).toHaveBeenCalledWith(1920, 1080);
+  });
+
   it("routes the resize rollback reconstruction through the injected createSender", async () => {
     const createWindow = vi.fn(
       (options: Electron.BrowserWindowConstructorOptions) => new BrowserWindow(options),
