@@ -72,6 +72,7 @@ interface TextureBridge {
   openPreview(): void;
   closePreview(): void;
   forwardFrames(target: WebContents, options?: FrameForwardOptions): FrameForward;
+  forwardPreviewFrames(target: WebContents, options: PreviewFrameForwardOptions): FrameForward;
   dispose(): void;
 
   readonly renderWindow: BrowserWindow;
@@ -99,7 +100,12 @@ failure, a change of failure reason, and the recovery back to success.
 ```typescript
 type ForwardStatus =
   | { ok: true }
-  | { ok: false; reason: "target-destroyed" | "import-failed" | "send-failed"; cause?: Error };
+  | {
+      ok: false;
+      // "preview-unavailable" only for forwardPreviewFrames registrations
+      reason: "target-destroyed" | "import-failed" | "send-failed" | "preview-unavailable";
+      cause?: Error;
+    };
 
 type ForwardStatusEvent = ForwardStatus & { extraArgs: readonly unknown[] };
 ```
@@ -155,6 +161,120 @@ Registers a `WebContents` (e.g. a monitor/multiviewer window) to receive every s
 The receiving end needs nothing new: a forwarded target consumes frames exactly like a Syphon/Spout receiver does — call `bindSharedTextureReceiver(sharedTexture)` once at renderer startup, then `receiver.consume({ onFrame: (frame, ...extraArgs) => ... })`. The `extraArgs` passed to `forwardFrames(target, { extraArgs })` arrive verbatim as the handler's trailing arguments, so one target can demultiplex frames forwarded from several sources (e.g. tag each source with its slot index).
 
 The current implementation imports the texture once per registered target per frame. When several targets share the same source frame, there's room to optimize to "import once per frame → send to every target → release only after all sends settle" — documented as a future option rather than built now, since no current caller needs it (a multiviewer slot is one source to one target).
+
+### `TextureBridge.forwardPreviewFrames(target, options)`
+
+```typescript
+// main
+const preview = bridge.forwardPreviewFrames(mainWindow.webContents, {
+  width: 384, // bounding box; aspect ratio is preserved, never upscaled
+  height: 216,
+  extraArgs: [slot],
+  onStatus: (s) => log(`slot ${slot} preview`, s.ok ? "ok" : s.reason),
+});
+// later
+preview.dispose(); // idempotent
+```
+
+```typescript
+// preload (contextIsolation stays on)
+import { ipcRenderer } from "electron";
+import { consumePreviewFrames } from "@napolab/texture-bridge-renderer/client";
+
+consumePreviewFrames(ipcRenderer, {
+  onFrame: (frame, slot) => {
+    // frame.data: Uint8ClampedArray, width*height*4 tightly packed upright RGBA.
+    // Transfer it to the page without a copy:
+    window.postMessage({ slot, ...frame }, "*", [frame.data.buffer]);
+  },
+});
+
+// page
+ctx.putImageData(new ImageData(msg.data, msg.width, msg.height), 0, 0);
+```
+
+A cheap thumbnail path for a window that only needs to *show* a small copy of
+each frame (deck lists, multiviewer thumbnails). Instead of forwarding the
+full-resolution shared texture (`forwardFrames`), the native sender downscales
+every frame on the GPU **in the same submission as the Syphon/Spout send** and
+reads the small result back asynchronously into a 3-slot ring — the send path
+never waits on the GPU. The RGBA bytes are delivered with
+`webContents.send(PREVIEW_FRAME_CHANNEL, { width, height, data }, ...extraArgs)`.
+
+Why not `forwardFrames` for thumbnails: per frame and per target, Electron's
+shared-texture path creates a new GPU SharedImage on import, does a synchronous
+sync-token flush on the browser UI thread on send and another in the renderer,
+runs a release round-trip, and the first GPU use in the renderer wraps a new
+IOSurface backing and copies the full-resolution frame. None of it is cached,
+so 4 decks × 30 fps of 1080p thumbnails cost far more than the pixels shown.
+The preview path replaces all of that with one small GPU pass and one IPC
+message (~330 KB for 384×216; 4 × 30 fps ≈ 40 MB/s of structured-clone copies
+— a few memcpys of ~1 MB per frame across all decks).
+
+- **Size.** macOS: exactly the aspect-fitted size (1080p in 384×216 → 384×216).
+  Windows: the smallest power-of-two mip level covering the fitted size
+  (1080p in 384×216 → 480×270), because the downscale uses
+  `GenerateMips` (no runtime shader compiler). Always read `width`/`height`
+  from each frame. One native tap per bridge: with several registrations, the
+  oldest registration's bounds are used for all of them.
+- **Latency.** macOS: each preview is delivered from the Metal completion of
+  its own frame, independent of later frames. Windows: D3D11 has no
+  completion callback, so finished readbacks are picked up by polling — at the
+  start of the next send (typically one frame behind), and, while the tap is
+  on and a readback is pending, by a ~8 ms bridge timer that calls
+  `TextureSender.pollPreview()`. So the last frame of a deck that stops
+  painting (a paused video, a static page) still arrives, roughly one timer
+  tick after the GPU finishes it. The timer is never armed on macOS, nor
+  while no readback is pending.
+- **Copies.** Each delivered preview is copied twice on the CPU: readback →
+  an owned buffer (the ring slot is reused immediately), then → the JS
+  `Buffer`, because Electron forbids external buffers (napi-rs falls back to
+  `napi_create_buffer_copy`); `webContents.send` then structured-clones it per
+  target.
+- **Pixels.** Upright, R,G,B,A byte order, straight from the paint texture.
+  With `includeAlpha: true` the OSR texture is premultiplied, so semi-
+  transparent pixels look darker through `putImageData` (which expects
+  straight alpha).
+- **Best-effort contract**, same as `forwardFrames`: a preview problem never
+  emits `"error"` and never affects the Syphon/Spout output. Transitions are
+  reported through `forwardStatus` / `onStatus` — `send-failed` (e.g. an
+  `extraArgs` value that cannot be cloned), `target-destroyed`, and
+  `preview-unavailable` when the native tap cannot be set up (unsupported
+  platform, Metal pipeline failure, an older native binary without
+  `setPreview`). In that last case the registration stays `active` and the tap
+  is retried on the next registration change or `resize()`; once a retry
+  succeeds, every registration — including the ones that reported
+  `preview-unavailable` — moves to `ok` with the next delivered frame.
+- **Lifecycle.** The native tap only runs while at least one registration
+  exists (the GPU pass and readback stop when the last one is disposed or its
+  target is destroyed), and is re-installed on the sender `resize()` rebuilds.
+  `active` / inert-handle rules match `forwardFrames`; bounds that are not
+  finite or round to less than 1 (e.g. `0.4`, `Infinity`) also yield an inert
+  handle. Each frame is a standalone IPC message, so
+  registering before the target finishes loading — or a target reload — needs
+  no handshake: frames sent while nobody listens are simply dropped.
+
+Lower level: `TextureSender.setPreview(maxWidth, maxHeight, callback | null)`
+on `@napolab/texture-bridge` / `-core` exposes the native tap directly
+(`callback` receives `{ data: Buffer, width, height }` on the JS thread). It
+covers `send` / `sendSurface`, plus `sendRgbaBuffer` on macOS
+(`sendRgbaBuffer` is not implemented on Windows). Once `setPreview` (or
+`stop()`) returns, the previous callback is never invoked again, even for
+frames already queued for it. On Windows, direct users must drive delivery
+themselves: after a send, call `TextureSender.pollPreview()` from a short
+timer while it returns `true` (it maps finished readbacks without waiting and
+returns whether one is still pending), or the last frame before sends stop is
+never delivered. On macOS `pollPreview()` is a no-op that returns `false`.
+
+### `consumePreviewFrames(ipcRenderer, handlers)` (from `renderer/client`)
+
+Subscribes to `forwardPreviewFrames` messages (only `on` / `removeListener`
+are used, so any `EventEmitter` works in tests). `onFrame(frame, ...extraArgs)`
+receives `{ width, height, data: Uint8ClampedArray }` — a view (no copy) over
+the bytes Electron deserialized for that message, safe to keep or transfer.
+Malformed messages and `onFrame` throws go to `onError` (default
+`console.error`) without stopping delivery. Returns `{ dispose() }`
+(idempotent); several consumers can share one `ipcRenderer`.
 
 ### `createWorkerRenderer(options)` (from `renderer/client`)
 

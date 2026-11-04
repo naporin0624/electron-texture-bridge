@@ -25,6 +25,66 @@
 #include "SpoutDirectX.h"
 #include <mmsystem.h> // timeBeginPeriod / timeEndPeriod (winmm)
 
+#include <vector>
+
+// ============================================================
+// Sender preview tap (downscaled CPU readback, best-effort)
+// ============================================================
+//
+// D3D11 has no completion callback, so the readback is polled: the frame sent
+// at N is downscaled into a staging ring slot, and the slot is mapped with
+// D3D11_MAP_FLAG_DO_NOT_WAIT on a later send (typically N+1) or by
+// spout_bridge_poll_preview (the JS bridge calls it from a short timer while a
+// slot is pending, so the last frame of a sender that stops sending is still
+// delivered). Nothing ever waits on the GPU; a slot that is still in flight
+// just stays pending.
+//
+// Downscale = CopySubresourceRegion into mip 0 of a full-resolution texture
+// with a mip chain -> GenerateMips (2x2 box filter per level) -> copy one mip
+// level into the staging slot. This avoids a runtime shader compiler
+// dependency; the price is that only power-of-two sizes are available, so the
+// preview is the smallest mip level that still covers the requested
+// (aspect-fitted) bounds and reports its real size.
+
+typedef void (*spout_preview_callback)(void* ctx,
+                                       const uint8_t* rgba,
+                                       uint32_t width,
+                                       uint32_t height);
+
+static constexpr uint32_t kPreviewRingSize = 3;
+
+struct SpoutPreviewSlot {
+    ID3D11Texture2D* staging = nullptr;
+    bool             pending = false;
+    uint64_t         seq = 0; // submission order of the pending copy
+};
+
+struct SpoutPreview {
+    spout_preview_callback callback = nullptr;
+    void*                  callbackCtx = nullptr;
+    uint32_t               maxWidth = 0;
+    uint32_t               maxHeight = 0;
+
+    // Full-resolution mip-chain texture the source is copied into.
+    ID3D11Texture2D*          mipTexture = nullptr;
+    ID3D11ShaderResourceView* mipSrv = nullptr;
+    uint32_t                  srcWidth = 0;
+    uint32_t                  srcHeight = 0;
+    DXGI_FORMAT               format = DXGI_FORMAT_UNKNOWN;
+    uint32_t                  mipLevels = 0;
+
+    // Selected level and the staging ring sized for it.
+    uint32_t         level = 0;
+    uint32_t         levelWidth = 0;
+    uint32_t         levelHeight = 0;
+    SpoutPreviewSlot ring[kPreviewRingSize];
+    uint64_t         nextSeq = 0;
+
+    std::vector<uint8_t> scratch; // tightly packed RGBA handed to the callback
+    uint64_t             skippedFrames = 0;
+    bool                 loggedFailure = false;
+};
+
 struct SpoutBridge {
     spoutDX sender;
     ID3D11Device* device;
@@ -33,9 +93,330 @@ struct SpoutBridge {
     unsigned int width;
     unsigned int height;
     bool initialized;
+    SpoutPreview preview;
 };
 
+static void log_preview_failure_once(SpoutPreview& preview, const char* what, HRESULT hr) {
+    if (preview.loggedFailure) return;
+    preview.loggedFailure = true;
+    fprintf(stderr, "[SpoutBridge] preview: %s failed (hr=0x%08lx); skipping preview frames\n",
+            what, static_cast<unsigned long>(hr));
+}
+
+static void release_preview_ring(SpoutPreview& preview) {
+    for (uint32_t i = 0; i < kPreviewRingSize; i++) {
+        if (preview.ring[i].staging) {
+            preview.ring[i].staging->Release();
+            preview.ring[i].staging = nullptr;
+        }
+        preview.ring[i].pending = false;
+    }
+    preview.levelWidth = 0;
+    preview.levelHeight = 0;
+}
+
+static void release_preview_resources(SpoutPreview& preview) {
+    release_preview_ring(preview);
+    if (preview.mipSrv) {
+        preview.mipSrv->Release();
+        preview.mipSrv = nullptr;
+    }
+    if (preview.mipTexture) {
+        preview.mipTexture->Release();
+        preview.mipTexture = nullptr;
+    }
+    preview.srcWidth = 0;
+    preview.srcHeight = 0;
+    preview.format = DXGI_FORMAT_UNKNOWN;
+    preview.mipLevels = 0;
+}
+
+static bool preview_format_supported(DXGI_FORMAT format) {
+    return format == DXGI_FORMAT_B8G8R8A8_UNORM || format == DXGI_FORMAT_R8G8B8A8_UNORM;
+}
+
+// (Re)create the mip-chain texture + staging ring when the source geometry or
+// format changes. All-or-nothing: on failure every preview resource is freed.
+static bool ensure_preview_resources(SpoutBridge* bridge, const D3D11_TEXTURE2D_DESC& src);
+
+// Map every pending slot whose copy has completed, oldest first, and deliver
+// the newest completed one. Never waits. A slot whose copy is still running
+// stops the scan (later submissions cannot have finished before it).
+static void poll_preview(SpoutBridge* bridge);
+
+// Queue the downscale + readback of `source` into a free ring slot.
+static void encode_preview(SpoutBridge* bridge, ID3D11Texture2D* source);
+
 extern "C" {
+
+// Pure helpers (exported for Rust tests) ------------------------------------
+
+void spout_preview_fit_size(uint32_t src_w,
+                            uint32_t src_h,
+                            uint32_t max_w,
+                            uint32_t max_h,
+                            uint32_t* out_w,
+                            uint32_t* out_h) {
+    if (!out_w || !out_h) return;
+    if (src_w == 0 || src_h == 0 || max_w == 0 || max_h == 0) {
+        *out_w = 0;
+        *out_h = 0;
+        return;
+    }
+    const uint64_t sw = src_w, sh = src_h, mw = max_w, mh = max_h;
+    uint64_t w = sw;
+    uint64_t h = sh;
+    if (sw > mw || sh > mh) {
+        if (mw * sh <= mh * sw) {
+            w = mw;
+            h = (sh * mw + sw / 2) / sw;
+        } else {
+            h = mh;
+            w = (sw * mh + sh / 2) / sh;
+        }
+    }
+    *out_w = static_cast<uint32_t>(w == 0 ? 1 : w);
+    *out_h = static_cast<uint32_t>(h == 0 ? 1 : h);
+}
+
+// The smallest mip level (largest index < mip_levels) of a src_w x src_h
+// texture whose size still covers the aspect-fitted max_w x max_h bounds.
+// Writes the level and its size. Level 0 when the bounds are not smaller.
+void spout_preview_pick_mip(uint32_t src_w,
+                            uint32_t src_h,
+                            uint32_t max_w,
+                            uint32_t max_h,
+                            uint32_t mip_levels,
+                            uint32_t* out_level,
+                            uint32_t* out_w,
+                            uint32_t* out_h) {
+    if (!out_level || !out_w || !out_h) return;
+    uint32_t fit_w = 0;
+    uint32_t fit_h = 0;
+    spout_preview_fit_size(src_w, src_h, max_w, max_h, &fit_w, &fit_h);
+    uint32_t level = 0;
+    if (fit_w > 0 && fit_h > 0) {
+        while (level + 1 < mip_levels) {
+            const uint32_t next_w = (src_w >> (level + 1)) > 0 ? (src_w >> (level + 1)) : 1;
+            const uint32_t next_h = (src_h >> (level + 1)) > 0 ? (src_h >> (level + 1)) : 1;
+            if (next_w < fit_w || next_h < fit_h) break;
+            level++;
+        }
+    }
+    *out_level = level;
+    *out_w = (src_w >> level) > 0 ? (src_w >> level) : 1;
+    *out_h = (src_h >> level) > 0 ? (src_h >> level) : 1;
+}
+
+} // extern "C"
+
+static bool ensure_preview_resources(SpoutBridge* bridge, const D3D11_TEXTURE2D_DESC& src) {
+    SpoutPreview& preview = bridge->preview;
+    const bool sameSource = preview.mipTexture && preview.srcWidth == src.Width &&
+                            preview.srcHeight == src.Height && preview.format == src.Format;
+    if (!sameSource) {
+        release_preview_resources(preview);
+
+        D3D11_TEXTURE2D_DESC desc = {};
+        desc.Width = src.Width;
+        desc.Height = src.Height;
+        desc.MipLevels = 0; // full chain
+        desc.ArraySize = 1;
+        desc.Format = src.Format;
+        desc.SampleDesc.Count = 1;
+        desc.Usage = D3D11_USAGE_DEFAULT;
+        desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        desc.MiscFlags = D3D11_RESOURCE_MISC_GENERATE_MIPS;
+        HRESULT hr = bridge->device->CreateTexture2D(&desc, nullptr, &preview.mipTexture);
+        if (FAILED(hr) || !preview.mipTexture) {
+            preview.mipTexture = nullptr;
+            log_preview_failure_once(preview, "CreateTexture2D(mip chain)", hr);
+            return false;
+        }
+        hr = bridge->device->CreateShaderResourceView(preview.mipTexture, nullptr, &preview.mipSrv);
+        if (FAILED(hr) || !preview.mipSrv) {
+            preview.mipSrv = nullptr;
+            log_preview_failure_once(preview, "CreateShaderResourceView(mip chain)", hr);
+            release_preview_resources(preview);
+            return false;
+        }
+        D3D11_TEXTURE2D_DESC created = {};
+        preview.mipTexture->GetDesc(&created);
+        preview.srcWidth = src.Width;
+        preview.srcHeight = src.Height;
+        preview.format = src.Format;
+        preview.mipLevels = created.MipLevels;
+    }
+
+    uint32_t level = 0;
+    uint32_t lw = 0;
+    uint32_t lh = 0;
+    spout_preview_pick_mip(preview.srcWidth, preview.srcHeight, preview.maxWidth,
+                           preview.maxHeight, preview.mipLevels, &level, &lw, &lh);
+    if (preview.ring[0].staging && preview.level == level && preview.levelWidth == lw &&
+        preview.levelHeight == lh) {
+        return true;
+    }
+
+    release_preview_ring(preview);
+    for (uint32_t i = 0; i < kPreviewRingSize; i++) {
+        D3D11_TEXTURE2D_DESC desc = {};
+        desc.Width = lw;
+        desc.Height = lh;
+        desc.MipLevels = 1;
+        desc.ArraySize = 1;
+        desc.Format = preview.format;
+        desc.SampleDesc.Count = 1;
+        desc.Usage = D3D11_USAGE_STAGING;
+        desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        HRESULT hr = bridge->device->CreateTexture2D(&desc, nullptr, &preview.ring[i].staging);
+        if (FAILED(hr) || !preview.ring[i].staging) {
+            preview.ring[i].staging = nullptr;
+            log_preview_failure_once(preview, "CreateTexture2D(staging)", hr);
+            release_preview_resources(preview);
+            return false;
+        }
+    }
+    preview.level = level;
+    preview.levelWidth = lw;
+    preview.levelHeight = lh;
+    return true;
+}
+
+// Copy one mapped staging slot into `scratch` as tightly packed RGBA.
+static void read_mapped_preview(SpoutPreview& preview, const D3D11_MAPPED_SUBRESOURCE& mapped) {
+    const uint32_t w = preview.levelWidth;
+    const uint32_t h = preview.levelHeight;
+    preview.scratch.resize(static_cast<size_t>(w) * h * 4);
+    const bool bgra = preview.format == DXGI_FORMAT_B8G8R8A8_UNORM;
+    for (uint32_t y = 0; y < h; y++) {
+        const uint8_t* src = static_cast<const uint8_t*>(mapped.pData) +
+                             static_cast<size_t>(y) * mapped.RowPitch;
+        uint8_t* dst = preview.scratch.data() + static_cast<size_t>(y) * w * 4;
+        if (!bgra) {
+            memcpy(dst, src, static_cast<size_t>(w) * 4);
+            continue;
+        }
+        for (uint32_t x = 0; x < w; x++) {
+            dst[x * 4 + 0] = src[x * 4 + 2];
+            dst[x * 4 + 1] = src[x * 4 + 1];
+            dst[x * 4 + 2] = src[x * 4 + 0];
+            dst[x * 4 + 3] = src[x * 4 + 3];
+        }
+    }
+}
+
+static int32_t oldest_pending_slot(const SpoutPreview& preview) {
+    int32_t oldest = -1;
+    for (uint32_t i = 0; i < kPreviewRingSize; i++) {
+        if (!preview.ring[i].pending) continue;
+        if (oldest < 0 || preview.ring[i].seq < preview.ring[oldest].seq) {
+            oldest = static_cast<int32_t>(i);
+        }
+    }
+    return oldest;
+}
+
+static void poll_preview(SpoutBridge* bridge) {
+    SpoutPreview& preview = bridge->preview;
+    bool haveFrame = false;
+    for (;;) {
+        const int32_t index = oldest_pending_slot(preview);
+        if (index < 0) break;
+        SpoutPreviewSlot& slot = preview.ring[index];
+        D3D11_MAPPED_SUBRESOURCE mapped = {};
+        const HRESULT hr = bridge->context->Map(slot.staging, 0, D3D11_MAP_READ,
+                                                D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped);
+        if (hr == DXGI_ERROR_WAS_STILL_DRAWING) break;
+        slot.pending = false;
+        if (FAILED(hr)) {
+            log_preview_failure_once(preview, "Map(staging)", hr);
+            continue;
+        }
+        // Older completed slots are overwritten by newer ones: only the
+        // newest finished preview is worth delivering.
+        read_mapped_preview(preview, mapped);
+        bridge->context->Unmap(slot.staging, 0);
+        haveFrame = true;
+    }
+    if (haveFrame && preview.callback) {
+        preview.callback(preview.callbackCtx, preview.scratch.data(), preview.levelWidth,
+                         preview.levelHeight);
+    }
+}
+
+static bool has_pending_preview(const SpoutPreview& preview) {
+    return oldest_pending_slot(preview) >= 0;
+}
+
+static void encode_preview(SpoutBridge* bridge, ID3D11Texture2D* source) {
+    SpoutPreview& preview = bridge->preview;
+    D3D11_TEXTURE2D_DESC src = {};
+    source->GetDesc(&src);
+    if (!preview_format_supported(src.Format) || src.SampleDesc.Count != 1) {
+        log_preview_failure_once(preview, "unsupported source format", E_INVALIDARG);
+        return;
+    }
+    if (!ensure_preview_resources(bridge, src)) return;
+
+    int32_t slotIndex = -1;
+    for (uint32_t i = 0; i < kPreviewRingSize; i++) {
+        if (!preview.ring[i].pending) {
+            slotIndex = static_cast<int32_t>(i);
+            break;
+        }
+    }
+    if (slotIndex < 0) {
+        preview.skippedFrames++;
+        return;
+    }
+
+    ID3D11DeviceContext* ctx = bridge->context;
+    ctx->CopySubresourceRegion(preview.mipTexture, 0, 0, 0, 0, source, 0, nullptr);
+    if (preview.mipLevels > 1) ctx->GenerateMips(preview.mipSrv);
+    ctx->CopySubresourceRegion(preview.ring[slotIndex].staging, 0, 0, 0, 0, preview.mipTexture,
+                               D3D11CalcSubresource(preview.level, 0, preview.mipLevels),
+                               nullptr);
+    preview.ring[slotIndex].pending = true;
+    preview.ring[slotIndex].seq = ++preview.nextSeq;
+    // Submit now so the copy is (usually) done by the next send's poll.
+    ctx->Flush();
+}
+
+extern "C" {
+
+int32_t spout_bridge_set_preview(void* handle,
+                                 uint32_t max_width,
+                                 uint32_t max_height,
+                                 spout_preview_callback cb,
+                                 void* ctx) {
+    if (!handle) return -1;
+    SpoutBridge* bridge = static_cast<SpoutBridge*>(handle);
+    if (cb && (max_width == 0 || max_height == 0)) return -1;
+    SpoutPreview& preview = bridge->preview;
+    preview.callback = cb;
+    preview.callbackCtx = cb ? ctx : nullptr;
+    preview.loggedFailure = false;
+    const bool boundsChanged = preview.maxWidth != max_width || preview.maxHeight != max_height;
+    preview.maxWidth = cb ? max_width : 0;
+    preview.maxHeight = cb ? max_height : 0;
+    if (!cb) {
+        // A disabled tap holds no GPU memory; pending readbacks are dropped.
+        release_preview_resources(preview);
+    } else if (boundsChanged) {
+        // New bounds may select another mip level: rebuilt on the next send.
+        release_preview_ring(preview);
+    }
+    return 0;
+}
+
+int32_t spout_bridge_poll_preview(void* handle) {
+    if (!handle) return -1;
+    SpoutBridge* bridge = static_cast<SpoutBridge*>(handle);
+    if (!bridge->initialized || !bridge->preview.callback) return 0;
+    poll_preview(bridge);
+    return has_pending_preview(bridge->preview) ? 1 : 0;
+}
 
 void* spout_bridge_create(const char* name, uint32_t width, uint32_t height) {
     SpoutBridge* bridge = new SpoutBridge();
@@ -81,6 +462,11 @@ void spout_bridge_destroy(void* handle) {
     if (!handle) return;
 
     SpoutBridge* bridge = static_cast<SpoutBridge*>(handle);
+    // Single-threaded with send/set_preview (all on the JS thread): once this
+    // starts no preview callback can run.
+    bridge->preview.callback = nullptr;
+    bridge->preview.callbackCtx = nullptr;
+    release_preview_resources(bridge->preview);
     bridge->sender.ReleaseSender();
     if (bridge->device1) {
         bridge->device1->Release();
@@ -100,7 +486,15 @@ int32_t spout_bridge_send(void* handle, int64_t shared_handle) {
     HANDLE nt_handle = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(shared_handle));
     if (!nt_handle) return -3;
 
-    // Open the shared texture from the handle
+    // Deliver previews of earlier frames whose readback has completed. Done
+    // first so a failed open below cannot starve the preview stream.
+    if (bridge->preview.callback) poll_preview(bridge);
+
+    // Open the shared texture from the handle. Deliberately not cached per
+    // handle (unlike the macOS IOSurface wrapper cache): the NT handle belongs
+    // to Electron's paint texture and is closed on release(), so its value can
+    // be reused for a different resource on a later frame, and a value-keyed
+    // cache would then silently publish a stale texture.
     ID3D11Texture2D* shared_texture = nullptr;
     HRESULT hr;
 
@@ -126,6 +520,10 @@ int32_t spout_bridge_send(void* handle, int64_t shared_handle) {
 
     // Send the texture via Spout
     bool success = bridge->sender.SendTexture(shared_texture);
+
+    // Preview tap: same device, same frame, queued right after the send.
+    // Best-effort — never changes the send result.
+    if (bridge->preview.callback) encode_preview(bridge, shared_texture);
 
     // Release the shared texture reference
     shared_texture->Release();

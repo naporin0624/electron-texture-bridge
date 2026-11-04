@@ -265,6 +265,22 @@ Source files:
 - `packages/core/src/electron.ts` (`forwardSharedTexture`, `ForwardDefect`)
 - `packages/example/src/main/index.ts` (`multi-connect` handler), `packages/example/src/preload/multiviewer.ts`
 
+### 3.4 forwardPreviewFrames (native downscaled thumbnails)
+
+`TextureBridge.forwardPreviewFrames(target, { width, height, extraArgs, onStatus })` registers into a separate entry set and turns on one native preview tap per bridge (`TextureSender.setPreview`, bounds of the oldest registration; off again when the last entry goes). The tap rides on the send:
+
+- **macOS** (`syphon_bridge.mm`): `publish_and_commit` encodes, after `publishFrameTexture` on the *same* command buffer, a fullscreen-triangle box-filter pass into a private RGBA8 target (sized to fit the bounds) and a blit into a Shared `MTLBuffer` of a 3-slot ring. The publish completion handler copies the bytes out (Metal completion thread) and frees the slot before decrementing the in-flight count, so `syphon_bridge_destroy`'s drain also covers preview delivery. The source is the cached `MTLTexture` wrapper (IOSurface → wrapper cache, ≤16 entries, CFRetained keys, flushed on size/format change and on destroy), so the tap adds no IOSurface wrap.
+- **Windows** (`spout_bridge.cpp`): after `SendTexture`, `CopySubresourceRegion` into mip 0 of a full-resolution mip-chain texture, `GenerateMips`, copy the covering mip level into a staging ring slot, `Flush`. The next `send` maps pending slots with `D3D11_MAP_FLAG_DO_NOT_WAIT` (never stalls) and delivers the newest completed one. D3D11 has no completion callback, so a sender that stops sending would otherwise never deliver its last frame: `TextureSender.pollPreview()` (`spout_bridge_poll_preview`) runs the same non-blocking map without a send, and `handlePaint` arms a one-shot ~8 ms timer after each send while the tap is on, re-arming only while `pollPreview()` reports a pending readback. On macOS the bridge never arms it (`getPlatform() !== "spout"`) and `pollPreview()` is a no-op.
+
+`lib.rs` copies the bytes into a `Vec<u8>` and queues it on an unref'd ThreadsafeFunction (queue bound 2 — a stalled JS thread drops previews). That is two CPU copies per delivered preview: readback → `Vec` (the slot is reused right away), and `Vec` → JS `Buffer`, because Electron forbids external buffers and napi-rs falls back to `napi_create_buffer_copy`. The TSFN calls a Rust dispatcher bound to the user callback; replacing or removing the tap flags the old TSFN as detached and *releases* it (never aborts: Node hands an aborted TSFN's leftover queue to `call_js_cb` with a null env, and napi-rs 2 returns there without freeing the payload), so queued stale frames are still dispatched and freed but skip the callback. On the JS thread the bridge sends `{ width, height, data }` plus `extraArgs` to every target with `webContents.send(PREVIEW_FRAME_CHANNEL, ...)` and settles the same `forwardStatus` transitions (`preview-unavailable` when `setPreview` throws). The renderer side is `consumePreviewFrames(ipcRenderer)`.
+
+Source files:
+- `packages/native/cpp/mac/syphon_bridge.mm` (`reserve_preview_slot`, `encode_preview`, `deliver_preview`, `wrap_surface_cached`)
+- `packages/native/cpp/win/spout_bridge.cpp` (`encode_preview`, `poll_preview`, `spout_bridge_poll_preview`)
+- `packages/native/src/lib.rs` (`TextureSender::set_preview`, `TextureSender::poll_preview`, `create_preview_sink`, `PreviewTap`)
+- `packages/renderer/src/bridge.ts` (`forwardPreviewFrames`, `applyPreviewTap`, `handlePreviewFrame`, `schedulePreviewPoll`)
+- `packages/renderer/src/client/preview-frame-consumer.ts`, `packages/renderer/src/client/preview-protocol.ts`
+
 ## 4. Native addon layers and threads
 
 ### 4.1 Layers

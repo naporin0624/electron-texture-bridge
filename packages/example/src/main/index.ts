@@ -172,6 +172,67 @@ const releaseSyphonSlot = (
   registry.delete(key);
 };
 
+/**
+ * Thumbnail window fed by `forwardPreviewFrames`: every local bridge is
+ * downscaled natively (same GPU submission as its Syphon/Spout send) and
+ * delivered as 384x216-bounded RGBA bytes — no per-frame shared-texture
+ * import, no renderer GPU upload of the full-resolution frame. Unlike the
+ * receiver/multiviewer demo windows this one keeps contextIsolation on: it is
+ * the shape a production app should copy.
+ */
+const openPreviewStrip = (
+  sources: ReadonlyArray<{ readonly label: string; readonly bridge: TextureBridge }>,
+): void => {
+  const win = new BrowserWindow({
+    useContentSize: true,
+    width: 2 * 384 + 8 + 16,
+    height: 2 * (216 + 24) + 16,
+    title: "Preview Strip (forwardPreviewFrames)",
+    webPreferences: {
+      preload: path.join(__dirname, "../preload/preview-strip.js"),
+      // The preload imports the package at runtime (externalized by
+      // electron-vite), which a sandboxed preload cannot `require`.
+      sandbox: false,
+      contextIsolation: true,
+      nodeIntegration: false,
+      backgroundThrottling: false,
+    },
+  });
+
+  const labels = encodeURIComponent(sources.map((s) => s.label).join(","));
+  if (process.env.ELECTRON_RENDERER_URL) {
+    void win.loadURL(`${process.env.ELECTRON_RENDERER_URL}/preview-strip.html?labels=${labels}`);
+  } else {
+    void win.loadFile(path.join(__dirname, "../renderer/preview-strip.html"), {
+      query: { labels: sources.map((s) => s.label).join(",") },
+    });
+  }
+
+  // Registration is safe before the page loads: each frame is a standalone
+  // IPC message, so frames sent before the preload listens are just dropped.
+  const forwards = sources.map(({ bridge }, slot) =>
+    bridge.forwardPreviewFrames(win.webContents, {
+      width: 384,
+      height: 216,
+      extraArgs: [slot],
+      onStatus: (status) => {
+        if (win.isDestroyed()) return;
+        const text = status.ok
+          ? "ok"
+          : `${status.reason}${status.cause ? `: ${status.cause.message}` : ""}`;
+        win.webContents.send("preview-strip-status", slot, text);
+      },
+    }),
+  );
+  if (forwards.some((f) => !f.active)) {
+    console.warn("[preview-strip] a preview registration was refused");
+  }
+
+  win.on("closed", () => {
+    for (const forward of forwards) forward.dispose();
+  });
+};
+
 const bootstrap = async (): Promise<void> => {
   console.log("[example] app ready");
   console.log(`[example] Electron: ${process.versions.electron}`);
@@ -265,6 +326,11 @@ const bootstrap = async (): Promise<void> => {
     } catch (err) {
       console.error(`[example] ${demoDef.name} bridge failed to start:`, err);
     }
+  }
+
+  // ---- Preview Strip Window (native downscaled previews) ----
+  if (!multiviewerOnly && process.env.PREVIEW_STRIP !== "0") {
+    openPreviewStrip([...localBridges.values()]);
   }
 
   // ---- Receiver Test Window (zero-copy GPU path) ----

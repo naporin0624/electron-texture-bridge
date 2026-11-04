@@ -6,8 +6,10 @@ import {
   type PaintTexture,
   type PaintDefect,
 } from "@napolab/texture-bridge-core";
-import { forwardSharedTexture, type ForwardDefect } from "@napolab/texture-bridge-core/electron";
+import { forwardSharedTexture } from "@napolab/texture-bridge-core/electron";
+import type { PreviewFrame } from "@napolab/texture-bridge-core";
 import { PreviewManager } from "./preview-manager";
+import { PREVIEW_FRAME_CHANNEL, type PreviewFrameMessage } from "./client/preview-protocol";
 import { FpsCounter } from "./fps-counter";
 import type {
   TextureBridgeOptions,
@@ -16,9 +18,15 @@ import type {
   ForwardStatusEvent,
   FrameForward,
   FrameForwardOptions,
+  PreviewFrameForwardOptions,
 } from "./types";
 import { toError } from "./to-error";
-import { notifyForwardObserver, toForwardStatus, unhookDestroyedListener } from "./forward-status";
+import {
+  notifyForwardObserver,
+  toForwardStatus,
+  unhookDestroyedListener,
+  type ForwardOutcome,
+} from "./forward-status";
 
 /**
  * Convert a pixel-space size to a device-independent (DIP) size for a given
@@ -104,8 +112,40 @@ interface ForwardEntry {
   readonly onStatus?: (status: ForwardStatus) => void;
   readonly onDestroyed: () => void;
   /** Last reported state, or `null` before the first frame settles. */
-  lastStatus: "ok" | ForwardDefect["reason"] | null;
+  lastStatus: "ok" | ForwardOutcome["reason"] | null;
 }
+
+/** One `forwardPreviewFrames` registration: a forward plus its bounds. */
+interface PreviewEntry extends ForwardEntry {
+  readonly width: number;
+  readonly height: number;
+}
+
+/** Bounds the native preview tap currently runs with (`null` = off). */
+interface AppliedPreview {
+  readonly width: number;
+  readonly height: number;
+}
+
+/**
+ * Integer preview bounds the native tap accepts, or `null` when either side
+ * is not finite or rounds to less than 1.
+ */
+const toPreviewBounds = (width: number, height: number): AppliedPreview | null => {
+  if (!Number.isFinite(width) || !Number.isFinite(height)) return null;
+  const rounded = { width: Math.round(width), height: Math.round(height) };
+  return rounded.width >= 1 && rounded.height >= 1 ? rounded : null;
+};
+
+/**
+ * Delay of the Windows preview poll (see `schedulePreviewPoll`): about half a
+ * 60fps frame, so a stopped sender's last preview lands within ~one frame of
+ * its GPU completion.
+ */
+const PREVIEW_POLL_INTERVAL_MS = 8;
+
+/** Handle for a refused registration — see `forwardFrames`. */
+const inertForward = (): FrameForward => ({ dispose: () => {}, active: false });
 
 /**
  * Injectable constructors for {@link createTextureBridgeWith}. Lets tests and
@@ -117,6 +157,10 @@ interface ForwardEntry {
  * environment additionally needs those mocked.
  * Future dependencies will be added as optional fields, so object literals
  * passing only these two members keep compiling.
+ *
+ * `createSender` returns the full native `TextureSender` type, so a test
+ * double typed as `InstanceType<typeof TextureSender>` must also provide
+ * `setPreview` and `pollPreview` (no-ops are enough when previews are unused).
  */
 export interface TextureBridgeDeps {
   createWindow: (options: Electron.BrowserWindowConstructorOptions) => BrowserWindow;
@@ -135,7 +179,16 @@ export class TextureBridgeImpl extends EventEmitter implements TextureBridge {
   private readonly policy: OsrScalePolicy;
   private readonly createSender: TextureBridgeDeps["createSender"];
   private readonly forwardEntries = new Set<ForwardEntry>();
+  private readonly previewEntries = new Set<PreviewEntry>();
+  private appliedPreview: AppliedPreview | null = null;
+  private readonly previewPolling: boolean;
+  private previewPollTimer: ReturnType<typeof setTimeout> | null = null;
 
+  /**
+   * @param previewPolling Whether the native preview tap needs
+   *   `sender.pollPreview()` to deliver a readback without a following send.
+   *   Only D3D11 (Windows) does; on macOS the poll is never scheduled.
+   */
   constructor(
     renderWindow: BrowserWindow,
     sender: InstanceType<typeof TextureSender>,
@@ -144,8 +197,10 @@ export class TextureBridgeImpl extends EventEmitter implements TextureBridge {
     policy: OsrScalePolicy = resolveOsrScalePolicy(resolveElectronMajor(process.versions)),
     createSender: TextureBridgeDeps["createSender"] = (name, width, height) =>
       new TextureSender(name, width, height),
+    previewPolling: boolean = process.platform === "win32",
   ) {
     super();
+    this.previewPolling = previewPolling;
     this._renderWindow = renderWindow;
     this.sender = sender;
     this.previewManager = previewManager;
@@ -184,11 +239,15 @@ export class TextureBridgeImpl extends EventEmitter implements TextureBridge {
    * At 30fps a stuck target would otherwise emit 30 identical events a
    * second (same dedupe stance as `frameDropped`).
    */
-  private settleForward(entry: ForwardEntry, defect: ForwardDefect | undefined): void {
+  private settleForward(
+    entry: ForwardEntry,
+    defect: ForwardOutcome | undefined,
+    entries: ReadonlySet<ForwardEntry> = this.forwardEntries,
+  ): void {
     // A result that lands after the registration was disposed (or pruned by
     // the target's "destroyed" event) describes a forward nobody owns
     // anymore — reporting it would resurrect a dead handle in the log.
-    if (!this.forwardEntries.has(entry)) return;
+    if (!entries.has(entry)) return;
     const next = defect?.reason ?? "ok";
     if (next === entry.lastStatus) return;
     entry.lastStatus = next;
@@ -248,6 +307,7 @@ export class TextureBridgeImpl extends EventEmitter implements TextureBridge {
       } else {
         this.emitFrameDropped(defect);
       }
+      this.schedulePreviewPoll();
       this.previewManager?.sendFrame(texture);
     } catch (err) {
       this.emit("error", toError(err));
@@ -289,7 +349,7 @@ export class TextureBridgeImpl extends EventEmitter implements TextureBridge {
     // `active: false` is the only trace a refused registration leaves —
     // without it the caller wires up a forward, gets a handle, and waits
     // forever for frames that were never going to come.
-    if (this._disposed || target.isDestroyed()) return { dispose: () => {}, active: false };
+    if (this._disposed || target.isDestroyed()) return inertForward();
 
     // `entry` closes over itself via `onDestroyed` — safe despite the
     // apparent forward reference: the closure only runs once `target`
@@ -303,35 +363,186 @@ export class TextureBridgeImpl extends EventEmitter implements TextureBridge {
       },
       lastStatus: null,
     };
-    this.forwardEntries.add(entry);
+    return this.registerForward(this.forwardEntries, entry, () => {});
+  }
+
+  forwardPreviewFrames(target: WebContents, options: PreviewFrameForwardOptions): FrameForward {
+    // Same refusal rules as forwardFrames, plus bounds the native tap
+    // would reject anyway — judged after rounding, which is what reaches the
+    // tap (0.4 would otherwise register and then fail as preview-unavailable).
+    if (this._disposed || target.isDestroyed()) return inertForward();
+    const bounds = toPreviewBounds(options.width, options.height);
+    if (bounds === null) return inertForward();
+
+    const entry: PreviewEntry = {
+      target,
+      extraArgs: options.extraArgs ?? [],
+      onStatus: options.onStatus,
+      width: bounds.width,
+      height: bounds.height,
+      onDestroyed: (): void => {
+        this.previewEntries.delete(entry);
+        this.applyPreviewTap();
+      },
+      lastStatus: null,
+    };
+    const forward = this.registerForward(this.previewEntries, entry, () => {
+      this.applyPreviewTap();
+    });
+    this.applyPreviewTap();
+    return forward;
+  }
+
+  /**
+   * Shared registration body of `forwardFrames` / `forwardPreviewFrames`:
+   * add `entry` to its set, auto-prune it when the target is destroyed, and
+   * hand back a handle whose `active` is the set membership. `onRemoved`
+   * runs after an explicit `dispose()` removed the entry.
+   */
+  private registerForward<E extends ForwardEntry>(
+    entries: Set<E>,
+    entry: E,
+    onRemoved: () => void,
+  ): FrameForward {
+    entries.add(entry);
 
     // Auto-prune when the target WebContents is destroyed out from under us
     // (e.g. its window closes without the caller ever calling dispose()) —
-    // otherwise the entry (and its WebContents reference) sits in
-    // forwardEntries forever, and every subsequent handlePaint calls
-    // forwardSharedTexture against an already-destroyed target.
-    target.once("destroyed", entry.onDestroyed);
+    // otherwise the entry (and its WebContents reference) sits in the set
+    // forever, and every subsequent frame is forwarded against an
+    // already-destroyed target.
+    entry.target.once("destroyed", entry.onDestroyed);
 
     // Membership in the set IS the liveness of this registration — reading
     // it through a getter keeps `active` honest for the two teardowns the
     // caller never initiates: the target being destroyed, and the bridge
     // being disposed. Captured as a local because an object-literal getter
     // does not inherit the enclosing `this`.
-    const entries = this.forwardEntries;
-
     return {
       dispose: () => {
-        this.forwardEntries.delete(entry);
+        if (!entries.delete(entry)) return;
         // This matters when the same long-lived `target` (e.g. the
         // multiviewer window) is registered and disposed repeatedly across
         // connect/disconnect cycles — without unhooking here, each cycle
         // leaves a dangling "destroyed" listener on that target.
         unhookDestroyedListener(entry);
+        onRemoved();
       },
       get active(): boolean {
         return entries.has(entry);
       },
     };
+  }
+
+  /**
+   * Reconcile the native preview tap with the registrations: off when there
+   * are none, otherwise the oldest registration's bounds (one tap per
+   * bridge — the native sender downscales once per frame). A sender that
+   * cannot provide the tap (unsupported platform, pipeline failure, an old
+   * native binary without `setPreview`) is reported to every registration
+   * as `preview-unavailable`, never as `"error"`.
+   */
+  private applyPreviewTap(): void {
+    if (this._disposed) return;
+    const [oldest] = this.previewEntries;
+    const wanted: AppliedPreview | null = oldest
+      ? { width: oldest.width, height: oldest.height }
+      : null;
+    const applied = this.appliedPreview;
+    if (wanted?.width === applied?.width && wanted?.height === applied?.height) return;
+
+    try {
+      if (wanted === null) {
+        this.appliedPreview = null;
+        this.cancelPreviewPoll();
+        this.sender.setPreview(0, 0, null);
+        return;
+      }
+      this.sender.setPreview(wanted.width, wanted.height, (frame) => {
+        this.handlePreviewFrame(frame);
+      });
+      this.appliedPreview = wanted;
+    } catch (err) {
+      this.appliedPreview = null;
+      const defect: ForwardOutcome = { reason: "preview-unavailable", cause: toError(err) };
+      for (const entry of this.previewEntries) {
+        this.settleForward(entry, defect, this.previewEntries);
+      }
+    }
+  }
+
+  /**
+   * Windows only: make sure the readback of the frame just sent is delivered
+   * even if no further send follows (a paused video, a static page). D3D11
+   * has no completion callback — without this, the native side only picks a
+   * finished readback up at the start of the *next* send. Arms one short
+   * timer at a time, only while the tap is on; the timer re-arms only while
+   * `pollPreview()` reports a pending readback, so an idle bridge holds no
+   * timer. Never scheduled where `previewPolling` is false (macOS).
+   */
+  private schedulePreviewPoll(): void {
+    if (!this.previewPolling || this.appliedPreview === null) return;
+    if (this.previewPollTimer !== null) return;
+    const timer = setTimeout(() => {
+      this.previewPollTimer = null;
+      this.pollPreview();
+    }, PREVIEW_POLL_INTERVAL_MS);
+    // A pending preview must not keep the process alive.
+    timer.unref?.();
+    this.previewPollTimer = timer;
+  }
+
+  private pollPreview(): void {
+    if (this._disposed || this.appliedPreview === null) return;
+    if (this.pollSenderPreview()) this.schedulePreviewPoll();
+  }
+
+  /**
+   * One native poll; finished readbacks are delivered synchronously through
+   * handlePreviewFrame. `true` while a readback is still pending.
+   */
+  private pollSenderPreview(): boolean {
+    try {
+      return this.sender.pollPreview();
+    } catch {
+      // An old native binary without pollPreview: nothing to poll for, the
+      // next send still delivers.
+      return false;
+    }
+  }
+
+  private cancelPreviewPoll(): void {
+    if (this.previewPollTimer === null) return;
+    clearTimeout(this.previewPollTimer);
+    this.previewPollTimer = null;
+  }
+
+  /** Native preview tap callback (JS thread): fan the frame out to every target. */
+  handlePreviewFrame(frame: PreviewFrame): void {
+    if (this._disposed) return;
+    const message: PreviewFrameMessage = {
+      width: frame.width,
+      height: frame.height,
+      data: frame.data,
+    };
+    for (const entry of this.previewEntries) {
+      // "destroyed" is emitted asynchronously, so a target can already be
+      // dead while its entry is still registered.
+      if (entry.target.isDestroyed()) {
+        this.settleForward(entry, { reason: "target-destroyed" }, this.previewEntries);
+        continue;
+      }
+      try {
+        entry.target.send(PREVIEW_FRAME_CHANNEL, message, ...entry.extraArgs);
+        this.settleForward(entry, undefined, this.previewEntries);
+      } catch (err) {
+        this.settleForward(
+          entry,
+          { reason: "send-failed", cause: toError(err) },
+          this.previewEntries,
+        );
+      }
+    }
   }
 
   resize(width: number, height: number): void {
@@ -366,13 +577,22 @@ export class TextureBridgeImpl extends EventEmitter implements TextureBridge {
       );
       this._renderWindow.setSize(prevDip.width, prevDip.height);
       this.sender = this.createSender(prevOpts.name, prevOpts.width, prevOpts.height);
+      this.reapplyPreviewTap();
       throw err;
     }
+    // The preview tap lives on the native sender, which was just replaced.
+    this.reapplyPreviewTap();
 
     // 3. Update preview canvas size
     this.previewManager?.updateSize(width, height);
 
     this.emit("resize", width, height);
+  }
+
+  /** Re-install the preview tap on a freshly constructed sender. */
+  private reapplyPreviewTap(): void {
+    this.appliedPreview = null;
+    this.applyPreviewTap();
   }
 
   dispose(): void {
@@ -393,10 +613,23 @@ export class TextureBridgeImpl extends EventEmitter implements TextureBridge {
     // WebContents (e.g. the multiviewer window) forever, retaining this
     // disposed bridge instance and eventually tripping
     // MaxListenersExceededWarning across repeated create/dispose cycles.
-    for (const entry of this.forwardEntries) {
+    for (const entry of [...this.forwardEntries, ...this.previewEntries]) {
       unhookDestroyedListener(entry);
     }
     this.forwardEntries.clear();
+    this.previewEntries.clear();
+    // Detach the preview tap explicitly before stopping: stop() would drop
+    // it too, but this keeps the teardown order independent of the native
+    // side (and of an old native binary without setPreview).
+    this.cancelPreviewPoll();
+    if (this.appliedPreview !== null) {
+      this.appliedPreview = null;
+      try {
+        this.sender.setPreview(0, 0, null);
+      } catch {
+        // stop() below releases the tap regardless.
+      }
+    }
     this.sender.stop();
     this.previewManager?.dispose();
     this.previewManager = null;

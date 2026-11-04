@@ -43,6 +43,70 @@ int syphon_bridge_send_rgba(SyphonBridgeHandle handle,
                             uint32_t bytes_per_row);
 
 // ============================================================
+// Sender: downscaled CPU preview (best-effort)
+// ============================================================
+
+// Invoked on a Metal command-buffer completion thread with one downscaled
+// preview of a frame that was just published. `rgba` holds width * height * 4
+// tightly packed bytes in R,G,B,A order, top row first (upright). The pointer
+// is only valid for the duration of the call — copy what you need. Runs while
+// the sender's preview mutex is held: must not block and must not call back
+// into the bridge.
+typedef void (*syphon_preview_callback)(void* ctx,
+                                        const uint8_t* rgba,
+                                        uint32_t width,
+                                        uint32_t height);
+
+// Enable (cb != NULL) or disable (cb == NULL) the preview tap. While enabled,
+// every published frame is also downscaled on the GPU — in the same command
+// buffer as the Syphon publish — to fit inside max_width x max_height
+// (aspect ratio preserved, never upscaled) and read back asynchronously into
+// a 3-slot ring. The send path never waits on the GPU; it only takes the
+// preview mutex briefly to reserve a slot, which can contend with
+// syphon_bridge_set_preview or a completion handler that is mid-delivery
+// (the callback runs under that mutex). When every slot is still in flight the
+// preview of that frame is skipped. Preview failures never affect the Syphon
+// publish.
+//
+// Once this returns with cb == NULL (or after syphon_bridge_destroy), no
+// further invocation of the previous callback happens and none is running.
+// Returns 0 on success, -1 on invalid arguments / handle, -2 when the
+// downscale pipeline cannot be built (the tap stays disabled).
+int syphon_bridge_set_preview(SyphonBridgeHandle handle,
+                              uint32_t max_width,
+                              uint32_t max_height,
+                              syphon_preview_callback cb,
+                              void* ctx);
+
+// Pure helper: the preview size for a src_w x src_h frame bounded by
+// max_w x max_h — aspect preserved, never larger than the source, each side
+// at least 1. Writes 0 x 0 when any input is 0.
+void syphon_preview_fit_size(uint32_t src_w,
+                             uint32_t src_h,
+                             uint32_t max_w,
+                             uint32_t max_h,
+                             uint32_t* out_w,
+                             uint32_t* out_h);
+
+// Pure helper: bilinear taps per axis for a src -> dst downscale so the box
+// filter covers the whole source footprint (each bilinear tap averages ~2
+// texels). Clamped to [1, 8].
+uint32_t syphon_preview_taps(uint32_t src, uint32_t dst);
+
+// Number of IOSurface -> MTLTexture wrappers currently cached by the sender
+// (sendSurface / send(IOSurfaceID) paths). Diagnostic / test hook.
+uint32_t syphon_bridge_texture_cache_count(SyphonBridgeHandle handle);
+
+// Test support: create a BGRA8 IOSurface of width x height whose top half is
+// filled with `top_bgra` and bottom half with `bottom_bgra` (each packed as
+// B | G << 8 | R << 16 | A << 24, i.e. little-endian BGRA bytes). Returns a +1
+// IOSurfaceRef; release it with native_close_shared_iosurface.
+void* syphon_debug_create_split_iosurface(uint32_t width,
+                                          uint32_t height,
+                                          uint32_t top_bgra,
+                                          uint32_t bottom_bgra);
+
+// ============================================================
 // Receiver (SyphonMetalClient)
 // ============================================================
 
