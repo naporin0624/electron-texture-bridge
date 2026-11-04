@@ -1,3 +1,5 @@
+#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+mod preview_gate;
 mod types;
 
 #[cfg(target_os = "macos")]
@@ -26,6 +28,91 @@ pub struct TextureSender {
 
     width: u32,
     height: u32,
+
+    /// JS side of the preview tap. Aborted once the native side stopped
+    /// invoking it (`set_preview(null)` / `stop()`), so nothing queued fires.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    preview_tsfn: Option<PreviewTsfn>,
+}
+
+/// Downscaled preview frame delivered by `TextureSender.setPreview`.
+///
+/// `data` holds `width * height * 4` bytes of tightly packed RGBA, top row
+/// first — directly usable as `new ImageData(new Uint8ClampedArray(data.buffer,
+/// data.byteOffset, data.byteLength), width, height)`.
+#[napi(object)]
+pub struct PreviewFrame {
+    pub data: napi::bindgen_prelude::Buffer,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Preview bytes in transit from the native thread to JS.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+struct PreviewPayload {
+    data: Vec<u8>,
+    width: u32,
+    height: u32,
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+type PreviewTsfn = napi::threadsafe_function::ThreadsafeFunction<
+    PreviewPayload,
+    napi::threadsafe_function::ErrorStrategy::Fatal,
+>;
+
+/// At most this many preview frames wait for the JS thread. A stalled JS
+/// thread drops previews instead of queueing ~330KB per frame without bound.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+const PREVIEW_QUEUE_SIZE: usize = 2;
+
+/// Wrap `callback` in an unref'd, gated ThreadsafeFunction and build the
+/// native sink that feeds it (copying the borrowed bytes into an owned Vec
+/// that becomes the JS Buffer without another copy).
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn create_preview_sink(
+    env: &Env,
+    callback: &JsFunction,
+) -> Result<(PreviewTsfn, types::PreviewCallback)> {
+    // Node's queue stays unbounded (0): its `queue_full` path leaks the payload
+    // in napi-rs 2. `gate` enforces PREVIEW_QUEUE_SIZE before anything is
+    // allocated or queued instead.
+    let gate = std::sync::Arc::new(preview_gate::PreviewGate::new(PREVIEW_QUEUE_SIZE));
+    let js_gate = gate.clone();
+    let mut tsfn: PreviewTsfn = callback.create_threadsafe_function(
+        0,
+        move |ctx: napi::threadsafe_function::ThreadSafeCallContext<PreviewPayload>| {
+            js_gate.release();
+            Ok(vec![PreviewFrame {
+                data: ctx.value.data.into(),
+                width: ctx.value.width,
+                height: ctx.value.height,
+            }])
+        },
+    )?;
+    // A preview tap must not keep the process alive on its own.
+    tsfn.unref(env)?;
+    let sink_tsfn = tsfn.clone();
+    let sink: types::PreviewCallback = Box::new(move |bytes: &[u8], width: u32, height: u32| {
+        // A full gate drops this preview frame (best-effort) before it is
+        // copied. `Closing` (TSFN aborted) only happens after the sink was
+        // detached; the slot is returned so the count stays honest.
+        if !gate.try_acquire() {
+            return;
+        }
+        let status = sink_tsfn.call(
+            PreviewPayload {
+                data: bytes.to_vec(),
+                width,
+                height,
+            },
+            napi::threadsafe_function::ThreadsafeFunctionCallMode::NonBlocking,
+        );
+        if status != napi::Status::Ok {
+            gate.release();
+        }
+    });
+    Ok((tsfn, sink))
 }
 
 #[napi]
@@ -47,7 +134,85 @@ impl TextureSender {
             inner: Some(inner),
             width,
             height,
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            preview_tsfn: None,
         })
+    }
+
+    /// Enable (callback) or disable (`null`) the downscaled preview tap.
+    ///
+    /// While enabled, every frame sent via `send` / `sendSurface` /
+    /// `sendRgbaBuffer` is also downscaled on the GPU, in the same submission
+    /// as the Syphon/Spout send, and read back asynchronously (never stalls
+    /// the send). The callback runs on the JS thread with a `PreviewFrame`
+    /// (tightly packed RGBA, upright), typically one frame behind the output.
+    ///
+    /// - macOS: the preview fits inside `maxWidth x maxHeight` with the aspect
+    ///   ratio preserved (never upscaled).
+    /// - Windows: the preview is the smallest power-of-two mip level of the
+    ///   frame that still covers the fitted size (e.g. 480x270 for a 1080p
+    ///   frame bounded by 384x216); `width` / `height` report the real size.
+    ///
+    /// Best-effort: a preview that cannot be produced for a frame is skipped;
+    /// it never fails the send. Throws when the tap cannot be set up (invalid
+    /// size, GPU pipeline failure, unsupported platform) or after `stop()`.
+    /// Calling again replaces the previous callback / bounds. The tap never
+    /// keeps the process alive.
+    #[napi(
+        ts_args_type = "maxWidth: number, maxHeight: number, callback: ((frame: PreviewFrame) => void) | null"
+    )]
+    #[cfg_attr(
+        not(any(target_os = "macos", target_os = "windows")),
+        allow(unused_variables)
+    )]
+    pub fn set_preview(
+        &mut self,
+        env: Env,
+        max_width: u32,
+        max_height: u32,
+        callback: Option<JsFunction>,
+    ) -> Result<()> {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            let inner = self
+                .inner
+                .as_mut()
+                .ok_or_else(|| Error::from_reason("TextureSender has been stopped"))?;
+            let Some(func) = callback else {
+                inner
+                    .set_preview(0, 0, None)
+                    .map_err(|e| Error::from_reason(e))?;
+                abort_preview(&mut self.preview_tsfn);
+                return Ok(());
+            };
+            if max_width == 0 || max_height == 0 {
+                return Err(Error::from_reason(
+                    "setPreview: maxWidth and maxHeight must be positive",
+                ));
+            }
+            let (tsfn, sink) = create_preview_sink(&env, &func)?;
+            let result = inner.set_preview(max_width, max_height, Some(sink));
+            // Whatever happened, the native side no longer invokes the
+            // previous sink (replaced or detached on failure).
+            abort_preview(&mut self.preview_tsfn);
+            match result {
+                Ok(()) => {
+                    self.preview_tsfn = Some(tsfn);
+                    Ok(())
+                }
+                Err(e) => {
+                    let _ = tsfn.abort();
+                    Err(Error::from_reason(e))
+                }
+            }
+        }
+
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            Err(Error::from_reason(
+                "setPreview is not supported on this platform",
+            ))
+        }
     }
 
     /// Send a shared texture to Spout (Win) or Syphon (Mac).
@@ -131,8 +296,12 @@ impl TextureSender {
     #[napi]
     pub fn stop(&mut self) -> Result<()> {
         // Drop the inner sender immediately, releasing native resources.
-        // Subsequent calls are idempotent (inner is already None).
+        // Subsequent calls are idempotent (inner is already None). Dropping
+        // it drains in-flight sends, so the preview sink is no longer running
+        // when its ThreadsafeFunction is aborted below.
         self.inner.take();
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        abort_preview(&mut self.preview_tsfn);
         Ok(())
     }
 
@@ -180,6 +349,15 @@ impl TextureSender {
         return "syphon-metal".to_string();
         #[cfg(not(any(target_os = "windows", target_os = "macos")))]
         return "unsupported".to_string();
+    }
+}
+
+/// Abort a preview ThreadsafeFunction whose native sink has been detached:
+/// Node never dispatches queued items of an aborted TSFN.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn abort_preview(tsfn: &mut Option<PreviewTsfn>) {
+    if let Some(tsfn) = tsfn.take() {
+        let _ = tsfn.abort();
     }
 }
 

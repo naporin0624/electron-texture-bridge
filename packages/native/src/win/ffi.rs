@@ -9,6 +9,35 @@ extern "C" {
     #[allow(dead_code)]
     pub fn spout_bridge_resize(handle: SpoutBridgeHandle, width: u32, height: u32) -> i32;
 
+    // ---- Sender preview tap ----
+    pub fn spout_bridge_set_preview(
+        handle: SpoutBridgeHandle,
+        max_width: u32,
+        max_height: u32,
+        cb: Option<SpoutPreviewCallback>,
+        ctx: *mut std::ffi::c_void,
+    ) -> i32;
+    #[allow(dead_code)]
+    pub fn spout_preview_fit_size(
+        src_w: u32,
+        src_h: u32,
+        max_w: u32,
+        max_h: u32,
+        out_w: *mut u32,
+        out_h: *mut u32,
+    );
+    #[allow(dead_code)]
+    pub fn spout_preview_pick_mip(
+        src_w: u32,
+        src_h: u32,
+        max_w: u32,
+        max_h: u32,
+        mip_levels: u32,
+        out_level: *mut u32,
+        out_w: *mut u32,
+        out_h: *mut u32,
+    );
+
     // ---- Receiver ----
     pub fn spout_receiver_create(sender_name: *const c_char) -> SpoutReceiverHandle;
     pub fn spout_receiver_destroy(handle: SpoutReceiverHandle);
@@ -60,3 +89,9 @@ pub type SpoutFrameCallback = unsafe extern "C" fn(
     height: u32,
     dxgi_format: u32,
 );
+
+/// Sender preview callback. Invoked synchronously inside `spout_bridge_send`
+/// (JS thread) with `width * height * 4` tightly packed, upright RGBA bytes
+/// that are only valid for the duration of the call.
+pub type SpoutPreviewCallback =
+    unsafe extern "C" fn(ctx: *mut std::ffi::c_void, rgba: *const u8, width: u32, height: u32);
