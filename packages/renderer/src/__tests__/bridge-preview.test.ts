@@ -18,6 +18,7 @@ vi.mock("@napolab/texture-bridge-core", () => ({
   TextureSender: class MockTextureSender {
     stop = vi.fn();
     setPreview = vi.fn();
+    pollPreview = vi.fn(() => false);
   },
   sendTextureFromPaintEvent: vi.fn(),
 }));
@@ -27,6 +28,7 @@ vi.mock("@napolab/texture-bridge-core/electron", () => ({
 }));
 
 import { TextureBridgeImpl } from "../bridge";
+import { sendTextureFromPaintEvent } from "@napolab/texture-bridge-core";
 import { PREVIEW_FRAME_CHANNEL } from "../client/preview-protocol";
 import { BrowserWindow } from "electron";
 import { TextureSender } from "@napolab/texture-bridge-core";
@@ -291,7 +293,7 @@ describe("TextureBridgeImpl.forwardPreviewFrames", () => {
     expect(setPreviewOf(sender)).not.toHaveBeenCalledWith(384, 216, expect.any(Function));
   });
 
-  it("rejects non-positive bounds with an inert handle", () => {
+  it("rejects a zero bound with an inert handle", () => {
     const sender = new TextureSender("t", 1920, 1080);
     const bridge = makeBridge(sender);
 
@@ -299,6 +301,80 @@ describe("TextureBridgeImpl.forwardPreviewFrames", () => {
       false,
     );
     expect(setPreviewOf(sender)).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["0.4 (rounds to 0)", 0.4, 216],
+    ["Infinity", Number.POSITIVE_INFINITY, 216],
+    ["NaN", Number.NaN, 216],
+    ["a negative height", 384, -1],
+    ["0.4 height", 384, 0.4],
+  ])("rejects bounds of %s with an inert handle", (_label, width, height) => {
+    const sender = new TextureSender("t", 1920, 1080);
+    const bridge = makeBridge(sender);
+    const statuses: ForwardStatus[] = [];
+
+    const forward = bridge.forwardPreviewFrames(makeTarget().wc, {
+      width,
+      height,
+      onStatus: (s) => {
+        statuses.push(s);
+      },
+    });
+
+    expect(forward.active).toBe(false);
+    expect(setPreviewOf(sender)).not.toHaveBeenCalled();
+    expect(statuses).toEqual([]);
+  });
+
+  it("accepts bounds that round up to 1", () => {
+    const sender = new TextureSender("t", 1920, 1080);
+    const bridge = makeBridge(sender);
+
+    const forward = bridge.forwardPreviewFrames(makeTarget().wc, { width: 0.5, height: 1.4 });
+
+    expect(forward.active).toBe(true);
+    expect(setPreviewOf(sender)).toHaveBeenCalledWith(1, 1, expect.any(Function));
+  });
+
+  it("retries the tap on the next registration after preview-unavailable and recovers to ok", () => {
+    const sender = new TextureSender("t", 1920, 1080);
+    const failure = new Error("transient");
+    setPreviewOf(sender).mockImplementationOnce(() => {
+      throw failure;
+    });
+    const bridge = makeBridge(sender);
+    const first: ForwardStatus[] = [];
+    const second: ForwardStatus[] = [];
+    const a = makeTarget();
+    const b = makeTarget();
+
+    bridge.forwardPreviewFrames(a.wc, {
+      width: 384,
+      height: 216,
+      onStatus: (s) => {
+        first.push(s);
+      },
+    });
+    bridge.forwardPreviewFrames(b.wc, {
+      width: 384,
+      height: 216,
+      onStatus: (s) => {
+        second.push(s);
+      },
+    });
+
+    // The failed attempt left no tap applied, so the next registration retries.
+    expect(setPreviewOf(sender)).toHaveBeenCalledTimes(2);
+    lastPreviewCallback(sender)(makeFrame());
+
+    expect(first).toEqual([
+      { ok: false, reason: "preview-unavailable", cause: failure },
+      { ok: true },
+    ]);
+    expect(second).toEqual([{ ok: true }]);
+    expect(a.send).toHaveBeenCalledTimes(1);
+    expect(b.send).toHaveBeenCalledTimes(1);
   });
 
   it("settles target-destroyed for a target that dies between frames", () => {
@@ -340,5 +416,140 @@ describe("TextureBridgeImpl.forwardPreviewFrames", () => {
 
     expect(() => lastPreviewCallback(sender)(makeFrame())).not.toThrow();
     expect(target.send).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("TextureBridgeImpl preview polling (Windows readback)", () => {
+  const paint = (bridge: TextureBridgeImpl): void => {
+    bridge.handlePaint({
+      texture: {
+        textureInfo: {} as never,
+        release: vi.fn(),
+      },
+    });
+  };
+
+  const pollOf = (sender: Sender): ReturnType<typeof vi.fn> =>
+    vi.mocked(sender.pollPreview) as unknown as ReturnType<typeof vi.fn>;
+
+  const makePollingBridge = (sender: Sender, previewPolling: boolean): TextureBridgeImpl =>
+    new TextureBridgeImpl(
+      new BrowserWindow(),
+      sender,
+      null,
+      baseOpts,
+      "unit-scale",
+      () => new TextureSender("t", 1, 1),
+      previewPolling,
+    );
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("polls after a send until no readback is pending, then goes idle", () => {
+    vi.useFakeTimers();
+    vi.mocked(sendTextureFromPaintEvent).mockReturnValue(undefined);
+    const sender = new TextureSender("t", 1920, 1080);
+    const target = makeTarget();
+    const bridge = makePollingBridge(sender, true);
+    bridge.forwardPreviewFrames(target.wc, { width: 384, height: 216 });
+    const deliver = lastPreviewCallback(sender);
+    // Pending twice, then the readback lands (delivered from inside the poll).
+    pollOf(sender)
+      .mockReturnValueOnce(true)
+      .mockImplementationOnce(() => {
+        deliver(makeFrame());
+        return false;
+      });
+
+    paint(bridge);
+    expect(pollOf(sender)).not.toHaveBeenCalled();
+
+    vi.advanceTimersByTime(8);
+    expect(pollOf(sender)).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(8);
+    expect(pollOf(sender)).toHaveBeenCalledTimes(2);
+    expect(target.send).toHaveBeenCalledTimes(1);
+
+    vi.advanceTimersByTime(100);
+    expect(pollOf(sender)).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("arms at most one timer for a burst of sends", () => {
+    vi.useFakeTimers();
+    const sender = new TextureSender("t", 1920, 1080);
+    const bridge = makePollingBridge(sender, true);
+    bridge.forwardPreviewFrames(makeTarget().wc, { width: 384, height: 216 });
+
+    paint(bridge);
+    paint(bridge);
+    paint(bridge);
+
+    expect(vi.getTimerCount()).toBe(1);
+    vi.advanceTimersByTime(8);
+    expect(pollOf(sender)).toHaveBeenCalledTimes(1);
+  });
+
+  it("never polls where the platform does not need it (macOS)", () => {
+    vi.useFakeTimers();
+    const sender = new TextureSender("t", 1920, 1080);
+    const bridge = makePollingBridge(sender, false);
+    bridge.forwardPreviewFrames(makeTarget().wc, { width: 384, height: 216 });
+
+    paint(bridge);
+
+    expect(vi.getTimerCount()).toBe(0);
+    vi.advanceTimersByTime(100);
+    expect(pollOf(sender)).not.toHaveBeenCalled();
+  });
+
+  it("never polls while the preview tap is off", () => {
+    vi.useFakeTimers();
+    const sender = new TextureSender("t", 1920, 1080);
+    const bridge = makePollingBridge(sender, true);
+
+    paint(bridge);
+
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("cancels a pending poll when the tap goes off or the bridge is disposed", () => {
+    vi.useFakeTimers();
+    const sender = new TextureSender("t", 1920, 1080);
+    const bridge = makePollingBridge(sender, true);
+    const forward = bridge.forwardPreviewFrames(makeTarget().wc, { width: 384, height: 216 });
+
+    paint(bridge);
+    forward.dispose();
+    expect(vi.getTimerCount()).toBe(0);
+
+    bridge.forwardPreviewFrames(makeTarget().wc, { width: 384, height: 216 });
+    paint(bridge);
+    bridge.dispose();
+    expect(vi.getTimerCount()).toBe(0);
+    vi.advanceTimersByTime(100);
+    expect(pollOf(sender)).not.toHaveBeenCalled();
+  });
+
+  it("stops polling when the native binary has no pollPreview", () => {
+    vi.useFakeTimers();
+    const sender = new TextureSender("t", 1920, 1080);
+    pollOf(sender).mockImplementation(() => {
+      throw new TypeError("sender.pollPreview is not a function");
+    });
+    const bridge = makePollingBridge(sender, true);
+    const errors: Error[] = [];
+    bridge.on("error", (e) => {
+      errors.push(e);
+    });
+    bridge.forwardPreviewFrames(makeTarget().wc, { width: 384, height: 216 });
+
+    paint(bridge);
+    vi.advanceTimersByTime(8);
+
+    expect(vi.getTimerCount()).toBe(0);
+    expect(errors).toEqual([]);
   });
 });

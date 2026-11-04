@@ -1,7 +1,7 @@
 /**
  * Wire format of `TextureBridge.forwardPreviewFrames` — shared by the main
  * process sender (bridge.ts) and the renderer receiver
- * (`bindPreviewFrameReceiver`). Electron-free so it can live in `/client`.
+ * (`consumePreviewFrames`). Electron-free so it can live in `/client`.
  */
 
 /** IPC channel the main process sends preview frames on (`webContents.send`). */

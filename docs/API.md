@@ -197,8 +197,8 @@ A cheap thumbnail path for a window that only needs to *show* a small copy of
 each frame (deck lists, multiviewer thumbnails). Instead of forwarding the
 full-resolution shared texture (`forwardFrames`), the native sender downscales
 every frame on the GPU **in the same submission as the Syphon/Spout send** and
-reads the small result back asynchronously into a 3-slot ring — no CPU wait on
-the send path, typically one frame of latency. The RGBA bytes are delivered with
+reads the small result back asynchronously into a 3-slot ring — the send path
+never waits on the GPU. The RGBA bytes are delivered with
 `webContents.send(PREVIEW_FRAME_CHANNEL, { width, height, data }, ...extraArgs)`.
 
 Why not `forwardFrames` for thumbnails: per frame and per target, Electron's
@@ -217,6 +217,20 @@ message (~330 KB for 384×216; 4 × 30 fps ≈ 40 MB/s of structured-clone copie
   `GenerateMips` (no runtime shader compiler). Always read `width`/`height`
   from each frame. One native tap per bridge: with several registrations, the
   oldest registration's bounds are used for all of them.
+- **Latency.** macOS: each preview is delivered from the Metal completion of
+  its own frame, independent of later frames. Windows: D3D11 has no
+  completion callback, so finished readbacks are picked up by polling — at the
+  start of the next send (typically one frame behind), and, while the tap is
+  on and a readback is pending, by a ~8 ms bridge timer that calls
+  `TextureSender.pollPreview()`. So the last frame of a deck that stops
+  painting (a paused video, a static page) still arrives, roughly one timer
+  tick after the GPU finishes it. The timer is never armed on macOS, nor
+  while no readback is pending.
+- **Copies.** Each delivered preview is copied twice on the CPU: readback →
+  an owned buffer (the ring slot is reused immediately), then → the JS
+  `Buffer`, because Electron forbids external buffers (napi-rs falls back to
+  `napi_create_buffer_copy`); `webContents.send` then structured-clones it per
+  target.
 - **Pixels.** Upright, R,G,B,A byte order, straight from the paint texture.
   With `includeAlpha: true` the OSR texture is premultiplied, so semi-
   transparent pixels look darker through `putImageData` (which expects
@@ -228,18 +242,29 @@ message (~330 KB for 384×216; 4 × 30 fps ≈ 40 MB/s of structured-clone copie
   `preview-unavailable` when the native tap cannot be set up (unsupported
   platform, Metal pipeline failure, an older native binary without
   `setPreview`). In that last case the registration stays `active` and the tap
-  is retried on the next registration change or `resize()`.
+  is retried on the next registration change or `resize()`; once a retry
+  succeeds, every registration — including the ones that reported
+  `preview-unavailable` — moves to `ok` with the next delivered frame.
 - **Lifecycle.** The native tap only runs while at least one registration
   exists (the GPU pass and readback stop when the last one is disposed or its
   target is destroyed), and is re-installed on the sender `resize()` rebuilds.
-  `active` / inert-handle rules match `forwardFrames`; non-positive bounds also
-  yield an inert handle. Each frame is a standalone IPC message, so
+  `active` / inert-handle rules match `forwardFrames`; bounds that are not
+  finite or round to less than 1 (e.g. `0.4`, `Infinity`) also yield an inert
+  handle. Each frame is a standalone IPC message, so
   registering before the target finishes loading — or a target reload — needs
   no handshake: frames sent while nobody listens are simply dropped.
 
 Lower level: `TextureSender.setPreview(maxWidth, maxHeight, callback | null)`
 on `@napolab/texture-bridge` / `-core` exposes the native tap directly
-(`callback` receives `{ data: Buffer, width, height }` on the JS thread).
+(`callback` receives `{ data: Buffer, width, height }` on the JS thread). It
+covers `send` / `sendSurface`, plus `sendRgbaBuffer` on macOS
+(`sendRgbaBuffer` is not implemented on Windows). Once `setPreview` (or
+`stop()`) returns, the previous callback is never invoked again, even for
+frames already queued for it. On Windows, direct users must drive delivery
+themselves: after a send, call `TextureSender.pollPreview()` from a short
+timer while it returns `true` (it maps finished readbacks without waiting and
+returns whether one is still pending), or the last frame before sends stop is
+never delivered. On macOS `pollPreview()` is a no-op that returns `false`.
 
 ### `consumePreviewFrames(ipcRenderer, handlers)` (from `renderer/client`)
 

@@ -127,6 +127,23 @@ interface AppliedPreview {
   readonly height: number;
 }
 
+/**
+ * Integer preview bounds the native tap accepts, or `null` when either side
+ * is not finite or rounds to less than 1.
+ */
+const toPreviewBounds = (width: number, height: number): AppliedPreview | null => {
+  if (!Number.isFinite(width) || !Number.isFinite(height)) return null;
+  const rounded = { width: Math.round(width), height: Math.round(height) };
+  return rounded.width >= 1 && rounded.height >= 1 ? rounded : null;
+};
+
+/**
+ * Delay of the Windows preview poll (see `schedulePreviewPoll`): about half a
+ * 60fps frame, so a stopped sender's last preview lands within ~one frame of
+ * its GPU completion.
+ */
+const PREVIEW_POLL_INTERVAL_MS = 8;
+
 /** Handle for a refused registration — see `forwardFrames`. */
 const inertForward = (): FrameForward => ({ dispose: () => {}, active: false });
 
@@ -140,6 +157,10 @@ const inertForward = (): FrameForward => ({ dispose: () => {}, active: false });
  * environment additionally needs those mocked.
  * Future dependencies will be added as optional fields, so object literals
  * passing only these two members keep compiling.
+ *
+ * `createSender` returns the full native `TextureSender` type, so a test
+ * double typed as `InstanceType<typeof TextureSender>` must also provide
+ * `setPreview` and `pollPreview` (no-ops are enough when previews are unused).
  */
 export interface TextureBridgeDeps {
   createWindow: (options: Electron.BrowserWindowConstructorOptions) => BrowserWindow;
@@ -160,7 +181,14 @@ export class TextureBridgeImpl extends EventEmitter implements TextureBridge {
   private readonly forwardEntries = new Set<ForwardEntry>();
   private readonly previewEntries = new Set<PreviewEntry>();
   private appliedPreview: AppliedPreview | null = null;
+  private readonly previewPolling: boolean;
+  private previewPollTimer: ReturnType<typeof setTimeout> | null = null;
 
+  /**
+   * @param previewPolling Whether the native preview tap needs
+   *   `sender.pollPreview()` to deliver a readback without a following send.
+   *   Only D3D11 (Windows) does; on macOS the poll is never scheduled.
+   */
   constructor(
     renderWindow: BrowserWindow,
     sender: InstanceType<typeof TextureSender>,
@@ -169,8 +197,10 @@ export class TextureBridgeImpl extends EventEmitter implements TextureBridge {
     policy: OsrScalePolicy = resolveOsrScalePolicy(resolveElectronMajor(process.versions)),
     createSender: TextureBridgeDeps["createSender"] = (name, width, height) =>
       new TextureSender(name, width, height),
+    previewPolling: boolean = process.platform === "win32",
   ) {
     super();
+    this.previewPolling = previewPolling;
     this._renderWindow = renderWindow;
     this.sender = sender;
     this.previewManager = previewManager;
@@ -277,6 +307,7 @@ export class TextureBridgeImpl extends EventEmitter implements TextureBridge {
       } else {
         this.emitFrameDropped(defect);
       }
+      this.schedulePreviewPoll();
       this.previewManager?.sendFrame(texture);
     } catch (err) {
       this.emit("error", toError(err));
@@ -337,16 +368,18 @@ export class TextureBridgeImpl extends EventEmitter implements TextureBridge {
 
   forwardPreviewFrames(target: WebContents, options: PreviewFrameForwardOptions): FrameForward {
     // Same refusal rules as forwardFrames, plus bounds the native tap
-    // would reject anyway.
+    // would reject anyway — judged after rounding, which is what reaches the
+    // tap (0.4 would otherwise register and then fail as preview-unavailable).
     if (this._disposed || target.isDestroyed()) return inertForward();
-    if (!(options.width > 0) || !(options.height > 0)) return inertForward();
+    const bounds = toPreviewBounds(options.width, options.height);
+    if (bounds === null) return inertForward();
 
     const entry: PreviewEntry = {
       target,
       extraArgs: options.extraArgs ?? [],
       onStatus: options.onStatus,
-      width: Math.round(options.width),
-      height: Math.round(options.height),
+      width: bounds.width,
+      height: bounds.height,
       onDestroyed: (): void => {
         this.previewEntries.delete(entry);
         this.applyPreviewTap();
@@ -421,6 +454,7 @@ export class TextureBridgeImpl extends EventEmitter implements TextureBridge {
     try {
       if (wanted === null) {
         this.appliedPreview = null;
+        this.cancelPreviewPoll();
         this.sender.setPreview(0, 0, null);
         return;
       }
@@ -435,6 +469,52 @@ export class TextureBridgeImpl extends EventEmitter implements TextureBridge {
         this.settleForward(entry, defect, this.previewEntries);
       }
     }
+  }
+
+  /**
+   * Windows only: make sure the readback of the frame just sent is delivered
+   * even if no further send follows (a paused video, a static page). D3D11
+   * has no completion callback — without this, the native side only picks a
+   * finished readback up at the start of the *next* send. Arms one short
+   * timer at a time, only while the tap is on; the timer re-arms only while
+   * `pollPreview()` reports a pending readback, so an idle bridge holds no
+   * timer. Never scheduled where `previewPolling` is false (macOS).
+   */
+  private schedulePreviewPoll(): void {
+    if (!this.previewPolling || this.appliedPreview === null) return;
+    if (this.previewPollTimer !== null) return;
+    const timer = setTimeout(() => {
+      this.previewPollTimer = null;
+      this.pollPreview();
+    }, PREVIEW_POLL_INTERVAL_MS);
+    // A pending preview must not keep the process alive.
+    timer.unref?.();
+    this.previewPollTimer = timer;
+  }
+
+  private pollPreview(): void {
+    if (this._disposed || this.appliedPreview === null) return;
+    if (this.pollSenderPreview()) this.schedulePreviewPoll();
+  }
+
+  /**
+   * One native poll; finished readbacks are delivered synchronously through
+   * handlePreviewFrame. `true` while a readback is still pending.
+   */
+  private pollSenderPreview(): boolean {
+    try {
+      return this.sender.pollPreview();
+    } catch {
+      // An old native binary without pollPreview: nothing to poll for, the
+      // next send still delivers.
+      return false;
+    }
+  }
+
+  private cancelPreviewPoll(): void {
+    if (this.previewPollTimer === null) return;
+    clearTimeout(this.previewPollTimer);
+    this.previewPollTimer = null;
   }
 
   /** Native preview tap callback (JS thread): fan the frame out to every target. */
@@ -541,6 +621,7 @@ export class TextureBridgeImpl extends EventEmitter implements TextureBridge {
     // Detach the preview tap explicitly before stopping: stop() would drop
     // it too, but this keeps the teardown order independent of the native
     // side (and of an old native binary without setPreview).
+    this.cancelPreviewPoll();
     if (this.appliedPreview !== null) {
       this.appliedPreview = null;
       try {

@@ -166,7 +166,7 @@ export interface PreviewFrameForwardOptions {
    */
   readonly width: number;
   readonly height: number;
-  /** `bindPreviewFrameReceiver(...).consume()` の onFrame に varargs で届くタグ */
+  /** `consumePreviewFrames(ipcRenderer, { onFrame })` の onFrame に varargs で届くタグ */
   readonly extraArgs?: readonly unknown[];
   /** {@link FrameForwardOptions.onStatus} と同じ — 状態が変わったときだけ呼ばれる */
   readonly onStatus?: (status: ForwardStatus) => void;
@@ -247,12 +247,12 @@ export interface TextureBridge {
    * a thumbnail.
    *
    * The downscale runs natively on the GPU in the same submission as the
-   * Syphon/Spout send and is read back asynchronously (one frame of
-   * latency, never a CPU wait), then delivered with
+   * Syphon/Spout send and is read back asynchronously (never a GPU wait on
+   * the send path), then delivered with
    * `webContents.send(PREVIEW_FRAME_CHANNEL, { width, height, data }, ...extraArgs)`
    * — `data` is tightly packed upright RGBA. Electron's per-frame
    * shared-texture import / sync-token flush / release round-trip is not
-   * involved at all. Receive it with `bindPreviewFrameReceiver(ipcRenderer)`
+   * involved at all. Receive it with `consumePreviewFrames(ipcRenderer, { onFrame })`
    * from `@napolab/texture-bridge-renderer/client`.
    *
    * Same best-effort contract as {@link forwardFrames}: delivery problems
@@ -261,7 +261,15 @@ export interface TextureBridge {
    * including `preview-unavailable` when the native tap cannot be set up.
    * The native tap only runs while at least one registration exists, and
    * survives {@link resize}. Returns an inert handle (`active: false`) after
-   * dispose, for an already-destroyed target, or for non-positive bounds.
+   * dispose, for an already-destroyed target, or for bounds that are not
+   * finite or round to less than 1.
+   *
+   * Latency: on macOS each preview is delivered from the GPU completion of
+   * its own frame. On Windows (D3D11 has no completion callback) the
+   * readback is polled: by the next send, and — while the tap is on and a
+   * readback is pending — by a short bridge timer, so the last frame of a
+   * deck that stops painting (a paused video, a static page) still arrives
+   * within roughly a timer tick after the GPU finishes it.
    */
   forwardPreviewFrames(target: WebContents, options: PreviewFrameForwardOptions): FrameForward;
 

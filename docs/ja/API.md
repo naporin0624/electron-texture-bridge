@@ -152,11 +152,15 @@ consumePreviewFrames(ipcRenderer, {
 });
 ```
 
-サムネイル表示専用の安価な経路。ネイティブ sender が Syphon/Spout 送出と**同じ GPU サブミッション内**で各フレームを縮小し、3 スロットのリングへ非同期に読み戻す(送出経路で CPU 待ちはしない。遅延は通常 1 フレーム)。RGBA バイト列は `webContents.send(PREVIEW_FRAME_CHANNEL, { width, height, data }, ...extraArgs)` で届く。Electron の sharedTexture 経路(毎フレームの import / 同期 flush / release 往復 / renderer での IOSurface ラップと全解像度コピー)を一切通らない。
+サムネイル表示専用の安価な経路。ネイティブ sender が Syphon/Spout 送出と**同じ GPU サブミッション内**で各フレームを縮小し、3 スロットのリングへ非同期に読み戻す(送出経路で GPU を待つことはない)。RGBA バイト列は `webContents.send(PREVIEW_FRAME_CHANNEL, { width, height, data }, ...extraArgs)` で届く。Electron の sharedTexture 経路(毎フレームの import / 同期 flush / release 往復 / renderer での IOSurface ラップと全解像度コピー)を一切通らない。
 
 - サイズ: macOS は枠にちょうど収まるサイズ、Windows は枠を覆う最小の 2 のべき乗 mip(1080p を 384×216 で頼むと 480×270)。実寸は毎フレームの `width`/`height` を読むこと。tap は bridge につき 1 本で、複数登録時は最も古い登録のサイズが使われる。
+- 遅延: macOS は各フレームの Metal 完了時にそのフレームの preview が届く(後続フレームに依存しない)。Windows は D3D11 に完了コールバックが無いためポーリングで拾う — 次の send の冒頭(通常 1 フレーム遅れ)と、tap が有効で読み戻しが未完了の間だけ動く約 8 ms の bridge タイマー(`TextureSender.pollPreview()` を呼ぶ)。これにより描画が止まったデッキ(一時停止した動画・静的ページ)の最後のフレームも、GPU 完了からおよそタイマー 1 周期で届く。macOS ではタイマーを張らず、未完了の読み戻しが無い間も張らない。
+- コピー: 届く preview 1 枚につき CPU コピーが 2 回ある — 読み戻し → 所有バッファ(リングのスロットはすぐ再利用されるため)、→ JS `Buffer`(Electron が external buffer を禁止しているため napi-rs が `napi_create_buffer_copy` にフォールバックする)。さらに `webContents.send` が target ごとに structured clone する。
 - `includeAlpha: true` の場合 OSR テクスチャは premultiplied なので、`putImageData` では半透明部分が暗く見える。
-- 契約は `forwardFrames` と同じ best-effort: `"error"` は出さず Syphon/Spout 出力にも影響しない。`forwardStatus` / `onStatus` に `send-failed` / `target-destroyed` / `preview-unavailable`(tap を張れない: 非対応プラットフォーム、Metal パイプライン失敗、`setPreview` の無い古いネイティブ binary)が遷移として届く。
+- 契約は `forwardFrames` と同じ best-effort: `"error"` は出さず Syphon/Spout 出力にも影響しない。`forwardStatus` / `onStatus` に `send-failed` / `target-destroyed` / `preview-unavailable`(tap を張れない: 非対応プラットフォーム、Metal パイプライン失敗、`setPreview` の無い古いネイティブ binary)が遷移として届く。`preview-unavailable` の後も登録は `active` のままで、次の登録変更か `resize()` で tap を張り直す。成功すれば次に届いたフレームで全登録(`preview-unavailable` を報告したものも含む)が `ok` に戻る。
+- 有限でない、または丸めると 1 未満になるサイズ(`0.4`、`Infinity` など)は inert handle(`active: false`)を返す。
+- 低レベル API `TextureSender.setPreview` は `send` / `sendSurface` と、macOS では `sendRgbaBuffer` も対象(Windows の `sendRgbaBuffer` は未実装)。`setPreview` / `stop()` が返った後は、キュー済みのフレームも含め旧 callback は二度と呼ばれない。Windows で直接使う場合は、send の後に `pollPreview()` が `true` を返す間だけ短いタイマーで呼び続けること(しないと送出が止まる直前のフレームが届かない)。macOS の `pollPreview()` は常に `false` を返す no-op。
 - 登録が 1 つも無い間は GPU 処理も止まる。`resize()` で作り直された sender には自動で張り直す。
 
 詳細は英語版 [API.md](../API.md#texturebridgeforwardpreviewframestarget-options) を参照。
