@@ -7,7 +7,8 @@ use std::ffi::CString;
 pub struct Sender {
     handle: ffi::SpoutBridgeHandle,
     /// Boxed so its address (the C callback context) stays stable. The C side
-    /// only invokes it synchronously inside `spout_bridge_send`, so replacing
+    /// only invokes it synchronously inside `spout_bridge_send` /
+    /// `spout_bridge_poll_preview` (both on this thread), so replacing
     /// or dropping it between calls (and after destroy in `Drop`) is safe.
     preview_callback: Option<Box<PreviewCallback>>,
 }
@@ -74,10 +75,19 @@ impl Sender {
             },
         };
         if ret != 0 {
+            // Refused before touching the bridge: the previous callback is
+            // still installed (and still owned here). Callers that want it
+            // gone detach with `set_preview(0, 0, None)`.
             return Err("Invalid preview size".into());
         }
         self.preview_callback = next;
         Ok(())
+    }
+
+    /// Deliver finished preview readbacks without sending. Returns whether a
+    /// readback is still pending (poll again later).
+    pub fn poll_preview(&self) -> bool {
+        unsafe { ffi::spout_bridge_poll_preview(self.handle) == 1 }
     }
 
     pub fn send(&self, texture_handle: RawTextureHandle) -> Result<(), String> {

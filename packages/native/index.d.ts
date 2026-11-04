@@ -93,11 +93,21 @@ export declare class TextureSender {
   /**
    * Enable (callback) or disable (`null`) the downscaled preview tap.
    *
-   * While enabled, every frame sent via `send` / `sendSurface` /
-   * `sendRgbaBuffer` is also downscaled on the GPU, in the same submission
-   * as the Syphon/Spout send, and read back asynchronously (never stalls
-   * the send). The callback runs on the JS thread with a `PreviewFrame`
-   * (tightly packed RGBA, upright), typically one frame behind the output.
+   * While enabled, every frame sent via `send` / `sendSurface` (and
+   * `sendRgbaBuffer` on macOS — it is not implemented on Windows) is also
+   * downscaled on the GPU, in the same submission as the Syphon/Spout
+   * send, and read back asynchronously (never stalls the send). The
+   * callback runs on the JS thread with a `PreviewFrame` (tightly packed
+   * RGBA, upright).
+   *
+   * Latency:
+   * - macOS: each preview is delivered as soon as the GPU finishes its
+   *   frame (Metal completion handler), independent of later sends.
+   * - Windows: D3D11 has no completion callback, so the readback is
+   *   polled — by the next `send` (typically one frame behind) or by
+   *   `pollPreview()`. Without either, the last frame of a sender that
+   *   stops sending is never delivered: call `pollPreview()` from a short
+   *   timer while it returns `true` (`createTextureBridge` does this).
    *
    * - macOS: the preview fits inside `maxWidth x maxHeight` with the aspect
    *   ratio preserved (never upscaled).
@@ -108,10 +118,28 @@ export declare class TextureSender {
    * Best-effort: a preview that cannot be produced for a frame is skipped;
    * it never fails the send. Throws when the tap cannot be set up (invalid
    * size, GPU pipeline failure, unsupported platform) or after `stop()`.
-   * Calling again replaces the previous callback / bounds. The tap never
-   * keeps the process alive.
+   * Calling again replaces the previous callback / bounds; once this
+   * returns (or `stop()` returns) the previous callback is never invoked
+   * again, even for frames already queued for it. The tap never keeps the
+   * process alive.
    */
   setPreview(maxWidth: number, maxHeight: number, callback: ((frame: PreviewFrame) => void) | null): void
+  /**
+   * Deliver preview frames whose GPU readback finished since the last
+   * send, without sending a new frame. Returns `true` while a readback is
+   * still pending (call again later), `false` when there is nothing left
+   * to deliver.
+   *
+   * Only Windows needs this: D3D11 has no completion callback, so a
+   * preview is otherwise only picked up by the *next* send — the last
+   * frame of a sender that stops sending (a paused video, a static page)
+   * would never arrive. It maps finished slots with `DO_NOT_WAIT` and
+   * never waits on the GPU. On macOS it is a no-op that returns `false`
+   * (Metal completion handlers deliver every preview on their own).
+   * Also `false` when the tap is off, after `stop()`, and on unsupported
+   * platforms. `createTextureBridge` calls it automatically.
+   */
+  pollPreview(): boolean
   /**
    * Send a shared texture to Spout (Win) or Syphon (Mac).
    *

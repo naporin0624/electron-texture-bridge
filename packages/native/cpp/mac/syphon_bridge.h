@@ -61,9 +61,12 @@ typedef void (*syphon_preview_callback)(void* ctx,
 // every published frame is also downscaled on the GPU — in the same command
 // buffer as the Syphon publish — to fit inside max_width x max_height
 // (aspect ratio preserved, never upscaled) and read back asynchronously into
-// a 3-slot ring. No CPU wait ever happens on the send path; when every slot is
-// still in flight the preview of that frame is skipped. Preview failures never
-// affect the Syphon publish.
+// a 3-slot ring. The send path never waits on the GPU; it only takes the
+// preview mutex briefly to reserve a slot, which can contend with
+// syphon_bridge_set_preview or a completion handler that is mid-delivery
+// (the callback runs under that mutex). When every slot is still in flight the
+// preview of that frame is skipped. Preview failures never affect the Syphon
+// publish.
 //
 // Once this returns with cb == NULL (or after syphon_bridge_destroy), no
 // further invocation of the previous callback happens and none is running.

@@ -33,8 +33,11 @@
 //
 // D3D11 has no completion callback, so the readback is polled: the frame sent
 // at N is downscaled into a staging ring slot, and the slot is mapped with
-// D3D11_MAP_FLAG_DO_NOT_WAIT on a later send (typically N+1). The send path
-// never waits on the GPU; a slot that is still in flight just stays pending.
+// D3D11_MAP_FLAG_DO_NOT_WAIT on a later send (typically N+1) or by
+// spout_bridge_poll_preview (the JS bridge calls it from a short timer while a
+// slot is pending, so the last frame of a sender that stops sending is still
+// delivered). Nothing ever waits on the GPU; a slot that is still in flight
+// just stays pending.
 //
 // Downscale = CopySubresourceRegion into mip 0 of a full-resolution texture
 // with a mip chain -> GenerateMips (2x2 box filter per level) -> copy one mip
@@ -342,6 +345,10 @@ static void poll_preview(SpoutBridge* bridge) {
     }
 }
 
+static bool has_pending_preview(const SpoutPreview& preview) {
+    return oldest_pending_slot(preview) >= 0;
+}
+
 static void encode_preview(SpoutBridge* bridge, ID3D11Texture2D* source) {
     SpoutPreview& preview = bridge->preview;
     D3D11_TEXTURE2D_DESC src = {};
@@ -401,6 +408,14 @@ int32_t spout_bridge_set_preview(void* handle,
         release_preview_ring(preview);
     }
     return 0;
+}
+
+int32_t spout_bridge_poll_preview(void* handle) {
+    if (!handle) return -1;
+    SpoutBridge* bridge = static_cast<SpoutBridge*>(handle);
+    if (!bridge->initialized || !bridge->preview.callback) return 0;
+    poll_preview(bridge);
+    return has_pending_preview(bridge->preview) ? 1 : 0;
 }
 
 void* spout_bridge_create(const char* name, uint32_t width, uint32_t height) {

@@ -17,6 +17,10 @@ extern "C" {
         cb: Option<SpoutPreviewCallback>,
         ctx: *mut std::ffi::c_void,
     ) -> i32;
+    /// Deliver finished preview readbacks without sending (Map DO_NOT_WAIT;
+    /// never waits on the GPU). 1 = a readback is still pending, 0 = none
+    /// (or the tap is off), -1 = null handle.
+    pub fn spout_bridge_poll_preview(handle: SpoutBridgeHandle) -> i32;
     #[allow(dead_code)]
     pub fn spout_preview_fit_size(
         src_w: u32,
@@ -90,8 +94,8 @@ pub type SpoutFrameCallback = unsafe extern "C" fn(
     dxgi_format: u32,
 );
 
-/// Sender preview callback. Invoked synchronously inside `spout_bridge_send`
-/// (JS thread) with `width * height * 4` tightly packed, upright RGBA bytes
-/// that are only valid for the duration of the call.
+/// Sender preview callback. Invoked synchronously inside `spout_bridge_send` /
+/// `spout_bridge_poll_preview` (JS thread) with `width * height * 4` tightly
+/// packed, upright RGBA bytes that are only valid for the duration of the call.
 pub type SpoutPreviewCallback =
     unsafe extern "C" fn(ctx: *mut std::ffi::c_void, rgba: *const u8, width: u32, height: u32);

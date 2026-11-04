@@ -85,8 +85,17 @@ impl Sender {
                 self.preview_callback = None;
                 Err("Failed to build the Metal preview pipeline".into())
             }
+            // Refused before touching the shared state: the previous
+            // callback is still installed (and still owned here). Callers
+            // that want it gone detach with `set_preview(0, 0, None)`.
             _ => Err("Invalid preview size".into()),
         }
+    }
+
+    /// No-op: Metal completion handlers deliver every preview on their own.
+    /// Always `false` (nothing for the caller to poll).
+    pub fn poll_preview(&self) -> bool {
+        false
     }
 
     #[cfg(test)]
@@ -314,6 +323,70 @@ mod tests {
             }
             drop(sender);
         }
+    }
+
+    // Swapping the callback while publishes are in flight: once set_preview(b)
+    // returns, `a` (freed right then) is never called again; the frames still
+    // in flight go to `b` (deliver_preview reads the current callback), and
+    // dropping the sender drains the rest without calling into a freed box.
+    #[test]
+    fn preview_callback_swap_with_publishes_in_flight() {
+        let surface = TestSurface::split(1280, 720, bgra(7, 7, 7, 255), bgra(7, 7, 7, 255));
+        let mut b_frames = 0usize;
+        for i in 0..100 {
+            let mut sender =
+                Sender::new(&format!("etb-preview-swap-test-{i}")).expect("create sender");
+            let (cb_a, rx_a) = preview_channel();
+            let (cb_b, rx_b) = preview_channel();
+            sender.set_preview(320, 180, Some(cb_a)).expect("enable preview a");
+            for _ in 0..3 {
+                sender.send_surface(surface.addr(), 1280, 720).expect("send");
+            }
+            sender.set_preview(320, 180, Some(cb_b)).expect("swap to preview b");
+            // Everything `a` will ever get has arrived by now.
+            let a_before = rx_a.try_iter().count();
+            for _ in 0..3 {
+                sender.send_surface(surface.addr(), 1280, 720).expect("send");
+            }
+            drop(sender); // drains every in-flight publish
+            assert_eq!(
+                rx_a.try_iter().count(),
+                0,
+                "callback a was invoked after it was replaced (had {a_before} before)"
+            );
+            b_frames += rx_b.try_iter().count();
+        }
+        assert!(b_frames > 0, "the replacement callback must receive frames");
+    }
+
+    // lib.rs's failure path: a refused replacement leaves the old callback
+    // installed, and the follow-up detach must silence it.
+    #[test]
+    fn refused_replacement_then_detach_silences_the_old_callback() {
+        let mut sender = Sender::new("etb-preview-refused-test").expect("create sender");
+        let (cb_a, rx_a) = preview_channel();
+        let (cb_b, _rx_b) = preview_channel();
+        sender.set_preview(64, 64, Some(cb_a)).expect("enable preview a");
+        assert!(sender.set_preview(0, 64, Some(cb_b)).is_err());
+        sender.set_preview(0, 0, None).expect("detach");
+
+        let surface = TestSurface::split(128, 128, bgra(1, 2, 3, 255), bgra(1, 2, 3, 255));
+        for _ in 0..3 {
+            sender.send_surface(surface.addr(), 128, 128).expect("send");
+        }
+        drop(sender);
+        assert!(rx_a.try_recv().is_err());
+    }
+
+    #[test]
+    fn poll_preview_is_a_no_op_on_macos() {
+        let mut sender = Sender::new("etb-preview-poll-test").expect("create sender");
+        assert!(!sender.poll_preview());
+        let (cb, _rx) = preview_channel();
+        sender.set_preview(64, 64, Some(cb)).expect("enable preview");
+        let surface = TestSurface::split(128, 128, bgra(1, 2, 3, 255), bgra(1, 2, 3, 255));
+        sender.send_surface(surface.addr(), 128, 128).expect("send");
+        assert!(!sender.poll_preview());
     }
 
     #[test]
