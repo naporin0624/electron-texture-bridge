@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.18.0](https://github.com/naporin0624/electron-texture-bridge/compare/native-v0.17.0...native-v0.18.0) (2026-11-04)
+
+
+### Features
+
+* native downscaled preview frames (forwardPreviewFrames) and Syphon texture cache ([8a2c3b3](https://github.com/naporin0624/electron-texture-bridge/commit/8a2c3b332eb5657c1ba2d223374ed3e8cb7e24ad))
+* **native:** downscaled preview tap on TextureSender and Syphon IOSurface texture cache ([1620902](https://github.com/naporin0624/electron-texture-bridge/commit/16209023d8174609078f8e0a798809e9bb193cd3))
+
+
+### Bug Fixes
+
+* **native:** poll Windows preview readbacks without a following send and release the preview TSFN without leaking queued frames ([c74d7de](https://github.com/naporin0624/electron-texture-bridge/commit/c74d7de14c358d6f322be5f730e94ecc526283a9))
+
 ## [0.17.0](https://github.com/naporin0624/electron-texture-bridge/compare/native-v0.16.0...native-v0.17.0) (2026-11-01)
 
 

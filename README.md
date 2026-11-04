@@ -235,6 +235,7 @@ The texture stays GPU-resident from the sender all the way to the consumer canva
 - **Cross-Platform**: Syphon Metal on macOS, Spout on Windows
 - **Electron Native**: Built for Electron 40+'s `useSharedTexture` paint events and `sharedTexture` module
 - **WebGPU Preview**: Optional zero-copy preview window using `importExternalTexture`
+- **Native Thumbnails**: `bridge.forwardPreviewFrames()` downscales each frame on the GPU in the same submission as the Syphon/Spout send and delivers small RGBA frames to any window — far cheaper than forwarding full-resolution shared textures when you only show a thumbnail (see [docs/API.md](docs/API.md#texturebridgeforwardpreviewframestarget-options))
 - **Factory APIs**: `createTextureBridge()` for sending, `createTextureReceiver()` for RGBA readback, `createSharedTextureReceiver()` for zero-copy GPU delivery — handle all boilerplate
 - **Low-Level API**: `sendTextureFromPaintEvent()`, `TextureReceiver`, and `closeNativeHandle()` for full control
 - **napi-rs**: Type-safe Rust → Node.js bindings with prebuilt binaries
@@ -312,6 +313,10 @@ The same source can be assigned to both routes at once (once forwarded directly,
 Each deck holds only its latest arrived frame; a `requestAnimationFrame` loop redraws whatever's held into the deck canvas and its composite quadrant on every tick, so draw cost is fixed to the display refresh rate regardless of how many slots are connected or how fast each source produces frames. Arrival fps (`onFrame` call rate) and draw fps (`rAF` draw rate) are tracked and shown separately per deck, since the two diverge whenever a source's frame rate and the display's refresh rate don't match.
 
 The composite canvas is itself the "renderer-side atlas": the grid deliberately does **not** GPU-atlas the four sources into one texture before forwarding — atlasing would only save a handful of import/IPC calls per frame (not a bottleneck at this scale) at the cost of adding a main-process compositing pass and a frame of latency, which defeats the point of a low-latency multiviewer.
+
+### Preview Strip (`forwardPreviewFrames`)
+
+A third window shows every local bridge as a 384×216-bounded thumbnail fed by `bridge.forwardPreviewFrames(...)`, with the size, arrival fps and `onStatus` state under each one. Unlike the demo receiver windows it keeps `contextIsolation` on: `src/preload/preview-strip.ts` receives frames with `consumePreviewFrames(ipcRenderer)` and transfers the bytes to the page, which draws them with `putImageData` — the shape to copy into an app. Set `PREVIEW_STRIP=0` to skip it.
 
 ### Packaging the example
 
