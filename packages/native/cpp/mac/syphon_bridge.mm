@@ -8,6 +8,7 @@
 #import <condition_variable>
 #import <memory>
 #import <mutex>
+#import <vector>
 
 // Syphon Metal Server のヘッダー（framework 内）
 // SyphonMetalServer は Syphon v5+ で利用可能
@@ -29,12 +30,348 @@ struct SenderState {
     int                     inFlight = 0; // committed, our handler not yet finished
 };
 
+// ---- Preview tap (downscaled CPU readback) ---------------------------------
+
+// Number of preview readback slots. One is written by the GPU while the
+// completion handler of an earlier frame may still be copying out of another.
+static constexpr uint32_t kPreviewRingSize = 3;
+
+// One preview readback slot: a private RGBA8 render target the downscale pass
+// draws into and a Shared MTLBuffer the target is blitted into (Shared
+// *buffers* are CPU-visible on every Mac; Shared *textures* are not allowed on
+// Intel GPUs). Held via shared_ptr so an in-flight completion handler keeps
+// the exact slot it reads alive across a ring reallocation or bridge destroy.
+struct PreviewSlot {
+    id<MTLTexture>    target = nil;
+    id<MTLBuffer>     readback = nil;
+    uint32_t          width = 0;
+    uint32_t          height = 0;
+    std::atomic<bool> busy{false};
+};
+
+// Shared by the sender (JS thread: configure + encode) and the publish
+// completion handlers (Metal completion thread: deliver). Every field below
+// `mutex` is guarded by it. The callback is only ever invoked with the mutex
+// held, so clearing it under the mutex guarantees no invocation is running or
+// can start afterwards.
+struct PreviewState {
+    std::mutex                   mutex;
+    syphon_preview_callback      callback = nullptr;
+    void*                        callbackCtx = nullptr;
+    uint32_t                     maxWidth = 0;
+    uint32_t                     maxHeight = 0;
+    std::shared_ptr<PreviewSlot> ring[kPreviewRingSize];
+    uint32_t                     ringWidth = 0;
+    uint32_t                     ringHeight = 0;
+    uint64_t                     skippedFrames = 0;
+    bool                         loggedGpuError = false;
+};
+
+// ---- IOSurface -> MTLTexture wrapper cache --------------------------------
+
+// Electron's OSR capturer cycles a small pool (<= ~11) of IOSurfaces, so
+// wrapping each one in a fresh MTLTexture per frame
+// (newTextureWithDescriptor:iosurface:) is pure overhead. Entries hold their
+// own CFRetain on the surface, so a cached pointer can never be freed and
+// reused for a different surface while it is a key here.
+static constexpr size_t kTextureCacheCapacity = 16;
+// An entry unused for this many sends belongs to a pool the capturer has
+// abandoned (renderer reload / crash / pool rotation): drop it so its
+// IOSurface (retained by the entry and its MTLTexture) is not kept alive
+// until the next resize. A live pool cycles in <= ~11 sends.
+static constexpr uint64_t kTextureCacheMaxIdleSends = 4 * kTextureCacheCapacity;
+// How often (in sends) the idle sweep runs on the cache-hit path.
+static constexpr uint64_t kTextureCacheSweepInterval = kTextureCacheCapacity;
+
+struct CachedSurfaceTexture {
+    IOSurfaceRef   surface = nullptr; // one CFRetain owned by the entry
+    id<MTLTexture> texture = nil;
+    uint32_t       width = 0;
+    uint32_t       height = 0;
+    MTLPixelFormat pixelFormat = (MTLPixelFormat)0;
+    uint64_t       lastUse = 0;
+};
+
 struct SyphonBridge {
     id<MTLDevice>       device;
     id<MTLCommandQueue> commandQueue;
     SyphonMetalServer*  server;
     std::shared_ptr<SenderState> state = std::make_shared<SenderState>();
+
+    // Preview tap. `previewPipeline` is built once by syphon_bridge_set_preview
+    // and only read on the JS thread afterwards.
+    std::shared_ptr<PreviewState> preview = std::make_shared<PreviewState>();
+    id<MTLRenderPipelineState>    previewPipeline = nil;
+
+    // Wrapper cache — touched only on the JS thread (send paths + destroy).
+    std::vector<CachedSurfaceTexture> textureCache;
+    uint64_t                          textureCacheClock = 0;
 };
+
+// MSL for the preview downscale. A fullscreen triangle covers the target; the
+// fragment derives its UV from the framebuffer position (origin top-left), so
+// destination row 0 samples source row 0. The paint IOSurface is stored in
+// image order (row 0 = top, which is why the Syphon publish needs
+// flipped:YES), so the readback comes out upright with no flip. The box
+// filter averages `taps` x `taps` bilinear samples spread over the source
+// footprint of one destination pixel (a single bilinear tap at a 5x
+// downscale would sample 4 of 25 source pixels and shimmer).
+static NSString* const kPreviewShaderSource =
+    @"#include <metal_stdlib>\n"
+    @"using namespace metal;\n"
+    @"struct PreviewVertexOut { float4 position [[position]]; };\n"
+    @"struct PreviewParams { float2 dstSize; uint2 taps; };\n"
+    @"vertex PreviewVertexOut texture_bridge_preview_vertex(uint vid [[vertex_id]]) {\n"
+    @"    float2 positions[3] = { float2(-1.0, -1.0), float2(3.0, -1.0), float2(-1.0, 3.0) };\n"
+    @"    PreviewVertexOut out;\n"
+    @"    out.position = float4(positions[vid], 0.0, 1.0);\n"
+    @"    return out;\n"
+    @"}\n"
+    @"fragment float4 texture_bridge_preview_fragment(PreviewVertexOut in [[stage_in]],\n"
+    @"                                                texture2d<float> src [[texture(0)]],\n"
+    @"                                                constant PreviewParams& p [[buffer(0)]]) {\n"
+    @"    constexpr sampler s(filter::linear, address::clamp_to_edge);\n"
+    @"    float2 uv = in.position.xy / p.dstSize;\n"
+    @"    float2 footprint = 1.0 / p.dstSize;\n"
+    @"    float4 acc = float4(0.0);\n"
+    @"    for (uint y = 0; y < p.taps.y; y++) {\n"
+    @"        for (uint x = 0; x < p.taps.x; x++) {\n"
+    @"            float2 o = (float2(float(x), float(y)) + 0.5) / float2(p.taps) - 0.5;\n"
+    @"            acc += src.sample(s, uv + o * footprint);\n"
+    @"        }\n"
+    @"    }\n"
+    @"    return acc / float(p.taps.x * p.taps.y);\n"
+    @"}\n";
+
+// Layout mirrors `PreviewParams` in kPreviewShaderSource.
+struct PreviewParams {
+    float    dstSize[2];
+    uint32_t taps[2];
+};
+
+static id<MTLRenderPipelineState> build_preview_pipeline(id<MTLDevice> device) {
+    NSError* error = nil;
+    id<MTLLibrary> library = [device newLibraryWithSource:kPreviewShaderSource
+                                                  options:nil
+                                                    error:&error];
+    if (!library) {
+        NSLog(@"[SyphonBridge] preview: shader compile failed: %@", error);
+        return nil;
+    }
+    MTLRenderPipelineDescriptor* desc = [[MTLRenderPipelineDescriptor alloc] init];
+    desc.vertexFunction = [library newFunctionWithName:@"texture_bridge_preview_vertex"];
+    desc.fragmentFunction = [library newFunctionWithName:@"texture_bridge_preview_fragment"];
+    desc.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+    id<MTLRenderPipelineState> pipeline = [device newRenderPipelineStateWithDescriptor:desc
+                                                                                 error:&error];
+    if (!pipeline) {
+        NSLog(@"[SyphonBridge] preview: pipeline creation failed: %@", error);
+    }
+    return pipeline;
+}
+
+static std::shared_ptr<PreviewSlot> make_preview_slot(id<MTLDevice> device,
+                                                      uint32_t width,
+                                                      uint32_t height) {
+    MTLTextureDescriptor* desc =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                           width:width
+                                                          height:height
+                                                       mipmapped:NO];
+    desc.usage = MTLTextureUsageRenderTarget;
+    desc.storageMode = MTLStorageModePrivate;
+    auto slot = std::make_shared<PreviewSlot>();
+    slot->target = [device newTextureWithDescriptor:desc];
+    slot->readback = [device newBufferWithLength:(NSUInteger)width * height * 4
+                                         options:MTLResourceStorageModeShared];
+    if (!slot->target || !slot->readback) return nullptr;
+    slot->width = width;
+    slot->height = height;
+    return slot;
+}
+
+// Reserve a free preview slot sized for `texture`, (re)allocating the ring on
+// a size change. Returns nullptr when the tap is off or every slot is busy.
+// Slots of a replaced ring that are still in flight stay alive through the
+// completion handler's shared_ptr and are simply never reused.
+static std::shared_ptr<PreviewSlot> reserve_preview_slot(SyphonBridge* bridge,
+                                                         id<MTLTexture> texture) {
+    PreviewState* preview = bridge->preview.get();
+    std::lock_guard<std::mutex> lock(preview->mutex);
+    if (!preview->callback || !bridge->previewPipeline) return nullptr;
+
+    uint32_t w = 0;
+    uint32_t h = 0;
+    syphon_preview_fit_size((uint32_t)texture.width, (uint32_t)texture.height,
+                            preview->maxWidth, preview->maxHeight, &w, &h);
+    if (w == 0 || h == 0) return nullptr;
+
+    if (w != preview->ringWidth || h != preview->ringHeight) {
+        for (auto& slot : preview->ring) {
+            slot = make_preview_slot(bridge->device, w, h);
+            if (!slot) {
+                for (auto& s : preview->ring) s = nullptr;
+                preview->ringWidth = 0;
+                preview->ringHeight = 0;
+                return nullptr;
+            }
+        }
+        preview->ringWidth = w;
+        preview->ringHeight = h;
+    }
+
+    for (auto& slot : preview->ring) {
+        if (!slot) continue;
+        bool expected = false;
+        if (slot->busy.compare_exchange_strong(expected, true)) return slot;
+    }
+    preview->skippedFrames++;
+    return nullptr;
+}
+
+// Encode the downscale + readback of `texture` into `slot` on `cmdBuf`.
+static void encode_preview(SyphonBridge* bridge,
+                           id<MTLCommandBuffer> cmdBuf,
+                           id<MTLTexture> texture,
+                           PreviewSlot* slot) {
+    MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    pass.colorAttachments[0].texture = slot->target;
+    pass.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+    pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+
+    PreviewParams params;
+    params.dstSize[0] = (float)slot->width;
+    params.dstSize[1] = (float)slot->height;
+    params.taps[0] = syphon_preview_taps((uint32_t)texture.width, slot->width);
+    params.taps[1] = syphon_preview_taps((uint32_t)texture.height, slot->height);
+
+    id<MTLRenderCommandEncoder> render = [cmdBuf renderCommandEncoderWithDescriptor:pass];
+    [render setRenderPipelineState:bridge->previewPipeline];
+    [render setFragmentTexture:texture atIndex:0];
+    [render setFragmentBytes:&params length:sizeof(params) atIndex:0];
+    [render drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    [render endEncoding];
+
+    id<MTLBlitCommandEncoder> blit = [cmdBuf blitCommandEncoder];
+    [blit copyFromTexture:slot->target
+                 sourceSlice:0
+                 sourceLevel:0
+                sourceOrigin:MTLOriginMake(0, 0, 0)
+                  sourceSize:MTLSizeMake(slot->width, slot->height, 1)
+                    toBuffer:slot->readback
+           destinationOffset:0
+      destinationBytesPerRow:(NSUInteger)slot->width * 4
+    destinationBytesPerImage:(NSUInteger)slot->width * slot->height * 4];
+    [blit endEncoding];
+}
+
+// Completion-thread half: hand the read-back bytes to the callback (if the tap
+// is still on and the slot belongs to the current ring), then free the slot.
+static void deliver_preview(const std::shared_ptr<PreviewState>& preview,
+                            const std::shared_ptr<PreviewSlot>& slot,
+                            bool gpuOk) {
+    {
+        std::lock_guard<std::mutex> lock(preview->mutex);
+        bool current = false;
+        for (auto& s : preview->ring) current = current || s == slot;
+        if (!gpuOk && !preview->loggedGpuError) {
+            preview->loggedGpuError = true;
+            NSLog(@"[SyphonBridge] preview: command buffer failed; skipping preview frames");
+        }
+        if (gpuOk && current && preview->callback) {
+            preview->callback(preview->callbackCtx,
+                              static_cast<const uint8_t*>(slot->readback.contents),
+                              slot->width, slot->height);
+        }
+    }
+    slot->busy.store(false);
+}
+
+// Return the MTLTexture wrapping `surface`, reusing a cached wrapper when the
+// surface, size and pixel format all match. JS thread only.
+static id<MTLTexture> wrap_surface_cached(SyphonBridge* bridge,
+                                          IOSurfaceRef surface,
+                                          uint32_t width,
+                                          uint32_t height) {
+    MTLPixelFormat fmt =
+        (MTLPixelFormat)syphon_map_pixel_format(IOSurfaceGetPixelFormat(surface));
+    auto& cache = bridge->textureCache;
+    const uint64_t now = ++bridge->textureCacheClock;
+
+    if (now % kTextureCacheSweepInterval == 0) {
+        for (auto it = cache.begin(); it != cache.end();) {
+            if (now - it->lastUse <= kTextureCacheMaxIdleSends) {
+                ++it;
+                continue;
+            }
+            it->texture = nil;
+            CFRelease(it->surface);
+            it = cache.erase(it);
+        }
+    }
+
+    for (auto& entry : cache) {
+        if (entry.surface != surface) continue;
+        if (entry.width == width && entry.height == height && entry.pixelFormat == fmt) {
+            entry.lastUse = now;
+            return entry.texture;
+        }
+        break; // same surface, new geometry/format: rebuilt below
+    }
+
+    MTLTextureDescriptor* desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:fmt
+                                                                                    width:width
+                                                                                   height:height
+                                                                                mipmapped:NO];
+    desc.usage = MTLTextureUsageShaderRead;
+    desc.storageMode = MTLStorageModeShared;
+    id<MTLTexture> texture = [bridge->device newTextureWithDescriptor:desc
+                                                            iosurface:surface
+                                                                plane:0];
+    if (!texture) return nil;
+
+    // A resize or format change retires every wrapper built for the old
+    // geometry (their surfaces are the capturer's previous pool), and the
+    // stale entry for this very surface if it was re-described.
+    for (auto it = cache.begin(); it != cache.end();) {
+        const bool stale = it->surface == surface || it->width != width ||
+                           it->height != height || it->pixelFormat != fmt;
+        if (!stale) {
+            ++it;
+            continue;
+        }
+        it->texture = nil;
+        CFRelease(it->surface);
+        it = cache.erase(it);
+    }
+    if (cache.size() >= kTextureCacheCapacity) {
+        auto lru = cache.begin();
+        for (auto it = cache.begin(); it != cache.end(); ++it) {
+            if (it->lastUse < lru->lastUse) lru = it;
+        }
+        lru->texture = nil;
+        CFRelease(lru->surface);
+        cache.erase(lru);
+    }
+
+    CachedSurfaceTexture entry;
+    entry.surface = (IOSurfaceRef)CFRetain(surface);
+    entry.texture = texture;
+    entry.width = width;
+    entry.height = height;
+    entry.pixelFormat = fmt;
+    entry.lastUse = now;
+    cache.push_back(entry);
+    return texture;
+}
+
+static void clear_texture_cache(SyphonBridge* bridge) {
+    for (auto& entry : bridge->textureCache) {
+        entry.texture = nil;
+        if (entry.surface) CFRelease(entry.surface);
+    }
+    bridge->textureCache.clear();
+}
 
 // Returned by the send functions once syphon_bridge_destroy has started.
 static const int kSenderShuttingDown = -2;
@@ -80,10 +417,21 @@ static int publish_and_commit(SyphonBridge* bridge,
                         onCommandBuffer:cmdBuf
                             imageRegion:NSMakeRect(0, 0, width, height)
                                 flipped:YES];
+
+    // Preview tap: encoded after the publish on the same command buffer, so
+    // it samples the same (cached) wrapper and adds no extra IOSurface wrap
+    // or submission. Best-effort — nullptr means "no preview this frame".
+    std::shared_ptr<PreviewState> preview = bridge->preview;
+    std::shared_ptr<PreviewSlot> previewSlot = reserve_preview_slot(bridge, texture);
+    if (previewSlot) encode_preview(bridge, cmdBuf, texture, previewSlot.get());
+
     [cmdBuf addCompletedHandler:^(id<MTLCommandBuffer> completed) {
         if (completed.error) {
             NSLog(@"[SyphonBridge] ERROR: publish (%@) cmdBuf error: %@", label, completed.error);
         }
+        // Delivered before the in-flight decrement so syphon_bridge_destroy's
+        // drain also covers preview callbacks.
+        if (previewSlot) deliver_preview(preview, previewSlot, completed.error == nil);
         std::lock_guard<std::mutex> lock(state->mutex);
         state->inFlight--;
         state->idle.notify_all();
@@ -138,6 +486,15 @@ void syphon_bridge_destroy(SyphonBridgeHandle handle) {
         const int stillInFlight = state->inFlight;
         lock.unlock();
 
+        // No preview callback may run once destroy returns (the Rust side
+        // frees the callback context right after). Handlers that outlive a
+        // timed-out drain find the callback cleared and skip delivery.
+        {
+            std::lock_guard<std::mutex> previewLock(bridge->preview->mutex);
+            bridge->preview->callback = nullptr;
+            bridge->preview->callbackCtx = nullptr;
+        }
+
         if (!drained) {
             // A wedged GPU kept a publish in flight. Stopping (or releasing)
             // the server now would free the connection manager under
@@ -152,6 +509,12 @@ void syphon_bridge_destroy(SyphonBridgeHandle handle) {
         } else {
             [bridge->server stop];
         }
+
+        // After the drain: committed publishes have completed, so the GPU no
+        // longer reads the cached wrappers (on a timed-out drain the command
+        // buffers retain the textures they use themselves).
+        clear_texture_cache(bridge);
+        bridge->previewPipeline = nil;
 
         bridge->server       = nil;
         bridge->commandQueue = nil;
@@ -168,24 +531,13 @@ int syphon_bridge_send(SyphonBridgeHandle handle,
     @autoreleasepool {
         auto* bridge = static_cast<SyphonBridge*>(handle);
 
-        // IOSurfaceID → IOSurfaceRef
+        // IOSurfaceID → IOSurfaceRef (+1)
         IOSurfaceRef surface = IOSurfaceLookup(surface_id);
         if (!surface) return -1;
 
-        // Derive MTLPixelFormat from the IOSurface's actual pixel format
-        MTLPixelFormat metalFmt = (MTLPixelFormat)syphon_map_pixel_format(IOSurfaceGetPixelFormat(surface));
-
-        // IOSurface → Metal Texture（GPU zero-copy: 同じ VRAM を参照）
-        MTLTextureDescriptor* desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:metalFmt
-                                                                                        width:width
-                                                                                       height:height
-                                                                                    mipmapped:NO];
-        desc.usage = MTLTextureUsageShaderRead;
-        desc.storageMode = MTLStorageModeShared;
-
-        id<MTLTexture> texture = [bridge->device newTextureWithDescriptor:desc
-                                                               iosurface:surface
-                                                                   plane:0];
+        // IOSurface → Metal Texture（GPU zero-copy, cached per surface）. The
+        // cache takes its own retain, so the lookup's +1 is dropped here.
+        id<MTLTexture> texture = wrap_surface_cached(bridge, surface, width, height);
         CFRelease(surface);
 
         if (!texture) return -1;
@@ -203,31 +555,130 @@ int syphon_bridge_send_surface(SyphonBridgeHandle handle,
     @autoreleasepool {
         auto* bridge = static_cast<SyphonBridge*>(handle);
 
-        // Cast to IOSurfaceRef directly (no lookup needed)
+        // Cast to IOSurfaceRef directly (no lookup needed). Electron owns this
+        // surface; the wrapper cache takes its own CFRetain while it keeps a
+        // wrapper for it.
         IOSurfaceRef surface = static_cast<IOSurfaceRef>(surface_ptr);
 
-        // Derive MTLPixelFormat from the IOSurface's actual pixel format
-        MTLPixelFormat metalFmt = (MTLPixelFormat)syphon_map_pixel_format(IOSurfaceGetPixelFormat(surface));
-
-        // IOSurface → Metal Texture（GPU zero-copy）
-        MTLTextureDescriptor* desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:metalFmt
-                                                                                        width:width
-                                                                                       height:height
-                                                                                    mipmapped:NO];
-        desc.usage = MTLTextureUsageShaderRead;
-        desc.storageMode = MTLStorageModeShared;
-
-        id<MTLTexture> texture = [bridge->device newTextureWithDescriptor:desc
-                                                               iosurface:surface
-                                                                   plane:0];
-
-        // Note: We don't CFRelease here because we don't own this surface
-        // (it's owned by Electron's shared texture system)
-
+        // IOSurface → Metal Texture（GPU zero-copy, cached per surface）
+        id<MTLTexture> texture = wrap_surface_cached(bridge, surface, width, height);
         if (!texture) return -1;
 
         // Publish to Syphon (GPU→GPU, zero-copy)
         return publish_and_commit(bridge, texture, width, height, @"IOSurface ptr");
+    }
+}
+
+int syphon_bridge_set_preview(SyphonBridgeHandle handle,
+                              uint32_t max_width,
+                              uint32_t max_height,
+                              syphon_preview_callback cb,
+                              void* ctx) {
+    if (!handle) return -1;
+    @autoreleasepool {
+        auto* bridge = static_cast<SyphonBridge*>(handle);
+        if (cb && (max_width == 0 || max_height == 0)) return -1;
+
+        // Build the pipeline before touching the shared state: a failure
+        // leaves the tap disabled and is reported to the caller up front
+        // (instead of as a silently blank preview).
+        if (cb && !bridge->previewPipeline) {
+            bridge->previewPipeline = build_preview_pipeline(bridge->device);
+            if (!bridge->previewPipeline) {
+                std::lock_guard<std::mutex> lock(bridge->preview->mutex);
+                bridge->preview->callback = nullptr;
+                bridge->preview->callbackCtx = nullptr;
+                return -2;
+            }
+        }
+
+        std::lock_guard<std::mutex> lock(bridge->preview->mutex);
+        PreviewState* preview = bridge->preview.get();
+        preview->callback = cb;
+        preview->callbackCtx = cb ? ctx : nullptr;
+        preview->maxWidth = cb ? max_width : 0;
+        preview->maxHeight = cb ? max_height : 0;
+        preview->loggedGpuError = false;
+        if (!cb) {
+            // Drop the ring (in-flight slots stay alive via their handlers) so
+            // a disabled tap holds no GPU memory.
+            for (auto& slot : preview->ring) slot = nullptr;
+            preview->ringWidth = 0;
+            preview->ringHeight = 0;
+        }
+        return 0;
+    }
+}
+
+void syphon_preview_fit_size(uint32_t src_w,
+                             uint32_t src_h,
+                             uint32_t max_w,
+                             uint32_t max_h,
+                             uint32_t* out_w,
+                             uint32_t* out_h) {
+    if (!out_w || !out_h) return;
+    if (src_w == 0 || src_h == 0 || max_w == 0 || max_h == 0) {
+        *out_w = 0;
+        *out_h = 0;
+        return;
+    }
+    // Scale = min(max_w / src_w, max_h / src_h, 1), compared exactly with
+    // 64-bit cross-multiplication instead of floating point.
+    const uint64_t sw = src_w, sh = src_h, mw = max_w, mh = max_h;
+    uint64_t w = sw;
+    uint64_t h = sh;
+    if (sw > mw || sh > mh) {
+        if (mw * sh <= mh * sw) {
+            // width-bound
+            w = mw;
+            h = (sh * mw + sw / 2) / sw;
+        } else {
+            // height-bound
+            h = mh;
+            w = (sw * mh + sh / 2) / sh;
+        }
+    }
+    *out_w = (uint32_t)(w == 0 ? 1 : w);
+    *out_h = (uint32_t)(h == 0 ? 1 : h);
+}
+
+uint32_t syphon_preview_taps(uint32_t src, uint32_t dst) {
+    if (src == 0 || dst == 0 || src <= dst) return 1;
+    // ceil(ratio / 2): each bilinear tap covers ~2 source texels per axis.
+    const uint32_t taps = (src + 2 * dst - 1) / (2 * dst);
+    if (taps < 1) return 1;
+    return taps > 8 ? 8 : taps;
+}
+
+uint32_t syphon_bridge_texture_cache_count(SyphonBridgeHandle handle) {
+    if (!handle) return 0;
+    return (uint32_t)static_cast<SyphonBridge*>(handle)->textureCache.size();
+}
+
+void* syphon_debug_create_split_iosurface(uint32_t width,
+                                          uint32_t height,
+                                          uint32_t top_bgra,
+                                          uint32_t bottom_bgra) {
+    if (width == 0 || height == 0) return nullptr;
+    @autoreleasepool {
+        NSDictionary* props = @{
+            (NSString*)kIOSurfaceWidth: @(width),
+            (NSString*)kIOSurfaceHeight: @(height),
+            (NSString*)kIOSurfaceBytesPerElement: @4,
+            (NSString*)kIOSurfacePixelFormat: @(kCVPixelFormatType_32BGRA),
+        };
+        IOSurfaceRef surface = IOSurfaceCreate((__bridge CFDictionaryRef)props);
+        if (!surface) return nullptr;
+        IOSurfaceLock(surface, 0, nullptr);
+        uint8_t* base = static_cast<uint8_t*>(IOSurfaceGetBaseAddress(surface));
+        const size_t stride = IOSurfaceGetBytesPerRow(surface);
+        for (uint32_t y = 0; y < height; y++) {
+            uint32_t* row = reinterpret_cast<uint32_t*>(base + y * stride);
+            const uint32_t px = y < height / 2 ? top_bgra : bottom_bgra;
+            for (uint32_t x = 0; x < width; x++) row[x] = px;
+        }
+        IOSurfaceUnlock(surface, 0, nullptr);
+        return surface;
     }
 }
 

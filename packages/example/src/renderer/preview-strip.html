@@ -1,0 +1,95 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Preview Strip</title>
+    <style>
+      body {
+        margin: 0;
+        padding: 8px;
+        background: #111;
+        color: #ddd;
+        font:
+          12px/1.4 ui-monospace,
+          monospace;
+      }
+      #grid {
+        display: grid;
+        grid-template-columns: repeat(2, 384px);
+        gap: 8px;
+      }
+      figure {
+        margin: 0;
+      }
+      canvas {
+        display: block;
+        width: 384px;
+        height: 216px;
+        background: repeating-conic-gradient(#222 0 25%, #2a2a2a 0 50%) 0 0 / 16px 16px;
+      }
+      figcaption {
+        padding: 2px 0 4px;
+        white-space: nowrap;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="grid"></div>
+    <script type="module">
+      // Thumbnails fed by TextureBridge.forwardPreviewFrames: the main process
+      // downscales each deck natively and sends RGBA bytes over IPC; the
+      // preload transfers them here (see src/preload/preview-strip.ts).
+      const labels = (new URLSearchParams(location.search).get("labels") ?? "").split(",");
+      const grid = document.getElementById("grid");
+      const slots = labels.map((label) => {
+        const figure = document.createElement("figure");
+        const canvas = document.createElement("canvas");
+        const caption = document.createElement("figcaption");
+        figure.append(canvas, caption);
+        grid.append(figure);
+        return {
+          label,
+          canvas,
+          ctx: canvas.getContext("2d"),
+          caption,
+          frames: 0,
+          fps: 0,
+          size: "-",
+          status: "waiting",
+        };
+      });
+
+      const render = (slot) => {
+        slot.caption.textContent = `${slot.label} | ${slot.size} | ${slot.fps.toFixed(1)} fps | ${slot.status}`;
+      };
+      slots.forEach(render);
+
+      window.addEventListener("message", (event) => {
+        const msg = event.data;
+        const slot = slots[msg?.slot];
+        if (!slot) return;
+        if (msg.type === "preview-status") {
+          slot.status = msg.text;
+          render(slot);
+          return;
+        }
+        if (msg.type !== "preview-frame") return;
+        if (slot.canvas.width !== msg.width || slot.canvas.height !== msg.height) {
+          slot.canvas.width = msg.width;
+          slot.canvas.height = msg.height;
+        }
+        slot.ctx.putImageData(new ImageData(msg.data, msg.width, msg.height), 0, 0);
+        slot.frames += 1;
+        slot.size = `${msg.width}x${msg.height}`;
+      });
+
+      setInterval(() => {
+        for (const slot of slots) {
+          slot.fps = slot.frames;
+          slot.frames = 0;
+          render(slot);
+        }
+      }, 1000);
+    </script>
+  </body>
+</html>

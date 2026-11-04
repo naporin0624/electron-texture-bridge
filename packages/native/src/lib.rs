@@ -1,3 +1,5 @@
+#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+mod preview_gate;
 mod types;
 
 #[cfg(target_os = "macos")]
@@ -26,6 +28,164 @@ pub struct TextureSender {
 
     width: u32,
     height: u32,
+
+    /// JS side of the preview tap. Detached (and released) once the native
+    /// side stopped invoking it (`set_preview` replace / `null`, `stop()`).
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    preview_tap: Option<PreviewTap>,
+}
+
+/// Downscaled preview frame delivered by `TextureSender.setPreview`.
+///
+/// `data` holds `width * height * 4` bytes of tightly packed RGBA, top row
+/// first — directly usable as `new ImageData(new Uint8ClampedArray(data.buffer,
+/// data.byteOffset, data.byteLength), width, height)`.
+#[napi(object)]
+pub struct PreviewFrame {
+    pub data: napi::bindgen_prelude::Buffer,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Preview bytes in transit from the native thread to JS.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+struct PreviewPayload {
+    data: Vec<u8>,
+    width: u32,
+    height: u32,
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+type PreviewTsfn = napi::threadsafe_function::ThreadsafeFunction<
+    PreviewPayload,
+    napi::threadsafe_function::ErrorStrategy::Fatal,
+>;
+
+/// One installed preview callback: its ThreadsafeFunction plus the flag that
+/// turns deliveries still queued for it into no-ops once it is detached.
+///
+/// Why not `abort`: an aborted TSFN never dispatches its queue; Node hands each
+/// leftover item to `call_js_cb` with a null env (`EmptyQueueAndDelete`), and
+/// napi-rs 2's `call_js_cb` returns early on a null env without freeing the
+/// boxed payload — one whole preview buffer leaked per queued frame. Released
+/// (not aborted) TSFNs dispatch every queued item normally, so each payload is
+/// freed; `detached` makes the stale ones skip the user callback.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+struct PreviewTap {
+    /// Held for its `Drop`, which releases the TSFN once the sink's clone is
+    /// gone too.
+    #[allow(dead_code)]
+    tsfn: PreviewTsfn,
+    detached: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+impl PreviewTap {
+    /// Stop delivering to this tap's callback. Must run only after the native
+    /// side no longer invokes the tap's sink. Dropping the last handle releases
+    /// the TSFN (the sink holds the other one): queued items are still
+    /// dispatched — and freed — but skip the user callback.
+    fn detach(self) {
+        self.detached
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+}
+
+/// At most this many preview frames wait for the JS thread. A stalled JS
+/// thread drops previews instead of queueing ~330KB per frame without bound.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+const PREVIEW_QUEUE_SIZE: usize = 2;
+
+/// `function (target, frame) { if (arguments.length > 1) target(frame) }`,
+/// written in Rust. A TSFN always calls its JS function, so the user callback
+/// is bound behind this: a detached delivery passes no frame and stops here.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn preview_dispatch(ctx: CallContext) -> Result<JsUndefined> {
+    if ctx.length > 1 {
+        let target: JsFunction = ctx.get(0)?;
+        let frame: JsUnknown = ctx.get(1)?;
+        // A throw propagates as the pending exception (uncaught, as before).
+        target.call(None, &[frame])?;
+    }
+    ctx.env.get_undefined()
+}
+
+/// `preview_dispatch.bind(undefined, callback)`: the JS function the TSFN
+/// calls. Bound (not a `Ref` held by Rust) so the TSFN alone keeps `callback`
+/// alive and drops it at finalize — even if the sender is GC'd without
+/// `stop()`.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn bind_preview_dispatch(env: &Env, callback: &JsFunction) -> Result<JsFunction> {
+    let dispatch = env
+        .create_function_from_closure("texturePreviewDispatch", preview_dispatch)?
+        .coerce_to_object()?;
+    let bind: JsFunction = dispatch.get_named_property("bind")?;
+    let target = unsafe { JsUnknown::from_raw(env.raw(), callback.raw())? };
+    let bound = bind.call(
+        Some(&dispatch),
+        &[env.get_undefined()?.into_unknown(), target],
+    )?;
+    Ok(unsafe { bound.cast::<JsFunction>() })
+}
+
+/// Wrap `callback` in an unref'd, gated ThreadsafeFunction and build the
+/// native sink that feeds it. Bytes are copied twice on the way to JS: the
+/// sink copies the borrowed readback into an owned Vec (the readback slot is
+/// reused right after), and napi-rs copies that Vec into the JS Buffer
+/// (`napi_create_buffer_copy`) because Electron forbids external buffers.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn create_preview_sink(
+    env: &Env,
+    callback: &JsFunction,
+) -> Result<(PreviewTap, types::PreviewCallback)> {
+    // Node's queue stays unbounded (0): its `queue_full` path leaks the payload
+    // in napi-rs 2. `gate` enforces PREVIEW_QUEUE_SIZE before anything is
+    // allocated or queued instead.
+    let gate = std::sync::Arc::new(preview_gate::PreviewGate::new(PREVIEW_QUEUE_SIZE));
+    let js_gate = gate.clone();
+    let detached = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let js_detached = detached.clone();
+    let dispatch = bind_preview_dispatch(env, callback)?;
+    let mut tsfn: PreviewTsfn = dispatch.create_threadsafe_function(
+        0,
+        move |ctx: napi::threadsafe_function::ThreadSafeCallContext<PreviewPayload>| {
+            // Every dispatched item returns its slot, stale or not.
+            js_gate.release();
+            if js_detached.load(std::sync::atomic::Ordering::Acquire) {
+                // Freed here (dropped with `ctx`); the dispatcher sees no
+                // frame and skips the callback.
+                return Ok(vec![]);
+            }
+            Ok(vec![PreviewFrame {
+                data: ctx.value.data.into(),
+                width: ctx.value.width,
+                height: ctx.value.height,
+            }])
+        },
+    )?;
+    // A preview tap must not keep the process alive on its own.
+    tsfn.unref(env)?;
+    let sink_tsfn = tsfn.clone();
+    let sink: types::PreviewCallback = Box::new(move |bytes: &[u8], width: u32, height: u32| {
+        // A full gate drops this preview frame (best-effort) before it is
+        // copied. A failed call (the TSFN is being torn down with its env)
+        // returns the slot so the count stays honest.
+        if !gate.try_acquire() {
+            return;
+        }
+        let status = sink_tsfn.call(
+            PreviewPayload {
+                data: bytes.to_vec(),
+                width,
+                height,
+            },
+            napi::threadsafe_function::ThreadsafeFunctionCallMode::NonBlocking,
+        );
+        if status != napi::Status::Ok {
+            gate.release();
+        }
+    });
+    Ok((PreviewTap { tsfn, detached }, sink))
 }
 
 #[napi]
@@ -47,7 +207,129 @@ impl TextureSender {
             inner: Some(inner),
             width,
             height,
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            preview_tap: None,
         })
+    }
+
+    /// Enable (callback) or disable (`null`) the downscaled preview tap.
+    ///
+    /// While enabled, every frame sent via `send` / `sendSurface` (and
+    /// `sendRgbaBuffer` on macOS — it is not implemented on Windows) is also
+    /// downscaled on the GPU, in the same submission as the Syphon/Spout
+    /// send, and read back asynchronously (never stalls the send). The
+    /// callback runs on the JS thread with a `PreviewFrame` (tightly packed
+    /// RGBA, upright).
+    ///
+    /// Latency:
+    /// - macOS: each preview is delivered as soon as the GPU finishes its
+    ///   frame (Metal completion handler), independent of later sends.
+    /// - Windows: D3D11 has no completion callback, so the readback is
+    ///   polled — by the next `send` (typically one frame behind) or by
+    ///   `pollPreview()`. Without either, the last frame of a sender that
+    ///   stops sending is never delivered: call `pollPreview()` from a short
+    ///   timer while it returns `true` (`createTextureBridge` does this).
+    ///
+    /// - macOS: the preview fits inside `maxWidth x maxHeight` with the aspect
+    ///   ratio preserved (never upscaled).
+    /// - Windows: the preview is the smallest power-of-two mip level of the
+    ///   frame that still covers the fitted size (e.g. 480x270 for a 1080p
+    ///   frame bounded by 384x216); `width` / `height` report the real size.
+    ///
+    /// Best-effort: a preview that cannot be produced for a frame is skipped;
+    /// it never fails the send. Throws when the tap cannot be set up (invalid
+    /// size, GPU pipeline failure, unsupported platform) or after `stop()`.
+    /// Calling again replaces the previous callback / bounds; once this
+    /// returns (or `stop()` returns) the previous callback is never invoked
+    /// again, even for frames already queued for it. The tap never keeps the
+    /// process alive.
+    #[napi(
+        ts_args_type = "maxWidth: number, maxHeight: number, callback: ((frame: PreviewFrame) => void) | null"
+    )]
+    #[cfg_attr(
+        not(any(target_os = "macos", target_os = "windows")),
+        allow(unused_variables)
+    )]
+    pub fn set_preview(
+        &mut self,
+        env: Env,
+        max_width: u32,
+        max_height: u32,
+        callback: Option<JsFunction>,
+    ) -> Result<()> {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            let inner = self
+                .inner
+                .as_mut()
+                .ok_or_else(|| Error::from_reason("TextureSender has been stopped"))?;
+            let Some(func) = callback else {
+                inner
+                    .set_preview(0, 0, None)
+                    .map_err(|e| Error::from_reason(e))?;
+                detach_preview(&mut self.preview_tap);
+                return Ok(());
+            };
+            if max_width == 0 || max_height == 0 {
+                return Err(Error::from_reason(
+                    "setPreview: maxWidth and maxHeight must be positive",
+                ));
+            }
+            let (tap, sink) = create_preview_sink(&env, &func)?;
+            let result = inner.set_preview(max_width, max_height, Some(sink));
+            if result.is_err() {
+                // Leave the tap off rather than half-replaced: the platform
+                // setters may refuse without touching the installed sink.
+                let _ = inner.set_preview(0, 0, None);
+            }
+            // Either way the native side no longer invokes the previous sink
+            // (replaced, or detached just above).
+            detach_preview(&mut self.preview_tap);
+            match result {
+                Ok(()) => {
+                    self.preview_tap = Some(tap);
+                    Ok(())
+                }
+                Err(e) => {
+                    tap.detach();
+                    Err(Error::from_reason(e))
+                }
+            }
+        }
+
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            Err(Error::from_reason(
+                "setPreview is not supported on this platform",
+            ))
+        }
+    }
+
+    /// Deliver preview frames whose GPU readback finished since the last
+    /// send, without sending a new frame. Returns `true` while a readback is
+    /// still pending (call again later), `false` when there is nothing left
+    /// to deliver.
+    ///
+    /// Only Windows needs this: D3D11 has no completion callback, so a
+    /// preview is otherwise only picked up by the *next* send — the last
+    /// frame of a sender that stops sending (a paused video, a static page)
+    /// would never arrive. It maps finished slots with `DO_NOT_WAIT` and
+    /// never waits on the GPU. On macOS it is a no-op that returns `false`
+    /// (Metal completion handlers deliver every preview on their own).
+    /// Also `false` when the tap is off, after `stop()`, and on unsupported
+    /// platforms. `createTextureBridge` calls it automatically.
+    #[napi]
+    pub fn poll_preview(&mut self) -> bool {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            self.inner
+                .as_ref()
+                .is_some_and(|inner| inner.poll_preview())
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            false
+        }
     }
 
     /// Send a shared texture to Spout (Win) or Syphon (Mac).
@@ -131,8 +413,12 @@ impl TextureSender {
     #[napi]
     pub fn stop(&mut self) -> Result<()> {
         // Drop the inner sender immediately, releasing native resources.
-        // Subsequent calls are idempotent (inner is already None).
+        // Subsequent calls are idempotent (inner is already None). Dropping
+        // it drains in-flight sends and frees the preview sink, so the tap
+        // can be detached below.
         self.inner.take();
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        detach_preview(&mut self.preview_tap);
         Ok(())
     }
 
@@ -180,6 +466,14 @@ impl TextureSender {
         return "syphon-metal".to_string();
         #[cfg(not(any(target_os = "windows", target_os = "macos")))]
         return "unsupported".to_string();
+    }
+}
+
+/// Detach the installed preview tap, if any (see `PreviewTap::detach`).
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn detach_preview(tap: &mut Option<PreviewTap>) {
+    if let Some(tap) = tap.take() {
+        tap.detach();
     }
 }
 

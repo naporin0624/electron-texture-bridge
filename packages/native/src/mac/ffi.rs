@@ -27,6 +27,35 @@ extern "C" {
         bytes_per_row: u32,
     ) -> i32;
 
+    // ---- Sender preview tap ----
+    pub fn syphon_bridge_set_preview(
+        handle: SyphonBridgeHandle,
+        max_width: u32,
+        max_height: u32,
+        cb: Option<SyphonPreviewCallback>,
+        ctx: *mut std::ffi::c_void,
+    ) -> i32;
+    #[allow(dead_code)]
+    pub fn syphon_preview_fit_size(
+        src_w: u32,
+        src_h: u32,
+        max_w: u32,
+        max_h: u32,
+        out_w: *mut u32,
+        out_h: *mut u32,
+    );
+    #[allow(dead_code)]
+    pub fn syphon_preview_taps(src: u32, dst: u32) -> u32;
+    #[allow(dead_code)]
+    pub fn syphon_bridge_texture_cache_count(handle: SyphonBridgeHandle) -> u32;
+    #[allow(dead_code)]
+    pub fn syphon_debug_create_split_iosurface(
+        width: u32,
+        height: u32,
+        top_bgra: u32,
+        bottom_bgra: u32,
+    ) -> IOSurfaceRef;
+
     // ---- Receiver ----
     pub fn syphon_receiver_create(
         server_uuid: *const c_char,
@@ -87,3 +116,9 @@ pub type SyphonFrameCallback = unsafe extern "C" fn(
     height: u32,
     pixel_format_code: u32,
 );
+
+/// Sender preview callback. Invoked on a Metal completion thread with
+/// `width * height * 4` tightly packed, upright RGBA bytes that are only valid
+/// for the duration of the call.
+pub type SyphonPreviewCallback =
+    unsafe extern "C" fn(ctx: *mut std::ffi::c_void, rgba: *const u8, width: u32, height: u32);

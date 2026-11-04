@@ -121,7 +121,13 @@ export type ForwardStatus =
   | { readonly ok: true }
   | {
       readonly ok: false;
-      readonly reason: ForwardDefect["reason"];
+      /**
+       * `preview-unavailable` は {@link TextureBridge.forwardPreviewFrames}
+       * 専用: ネイティブの縮小プレビュー tap を張れなかった(非対応
+       * プラットフォーム / GPU パイプライン構築失敗 / 古いネイティブ binary)。
+       * 登録自体は生きている(`active: true`)ので、次の登録・resize で再試行される。
+       */
+      readonly reason: ForwardDefect["reason"] | "preview-unavailable";
       /** `target-destroyed` には原因例外が無いので省略される */
       readonly cause?: Error;
     };
@@ -144,6 +150,25 @@ export interface FrameForwardOptions {
    * best-effort な監視チャネルなので、ここで throw しても転送は止まらない
    * (例外は握られ、`console.error` に落ちる)。
    */
+  readonly onStatus?: (status: ForwardStatus) => void;
+}
+
+/** Options for {@link TextureBridge.forwardPreviewFrames} */
+export interface PreviewFrameForwardOptions {
+  /**
+   * 縮小プレビューの外接サイズ(px)。フレームはアスペクト比を保ったままこの
+   * 枠に収まるよう縮小される(拡大はしない)。macOS ではちょうど収まるサイズ、
+   * Windows では枠を覆う最小の 2 のべき乗 mip(1080p を 384x216 で頼むと
+   * 480x270)になる — 実寸は毎フレームの `width` / `height` で届く。
+   *
+   * ネイティブの tap は bridge につき 1 本なので、複数登録がある場合は
+   * 最も古い登録のサイズが全登録に使われる。
+   */
+  readonly width: number;
+  readonly height: number;
+  /** `consumePreviewFrames(ipcRenderer, { onFrame })` の onFrame に varargs で届くタグ */
+  readonly extraArgs?: readonly unknown[];
+  /** {@link FrameForwardOptions.onStatus} と同じ — 状態が変わったときだけ呼ばれる */
   readonly onStatus?: (status: ForwardStatus) => void;
 }
 
@@ -214,6 +239,39 @@ export interface TextureBridge {
    * register. Check `active` at the call site to catch a refused wiring.
    */
   forwardFrames(target: WebContents, options?: FrameForwardOptions): FrameForward;
+
+  /**
+   * Register a `WebContents` to receive a small, CPU-side preview of every
+   * subsequent frame (e.g. a 384x216 thumbnail in a deck list) — a cheaper
+   * alternative to {@link forwardFrames} when the target only needs to show
+   * a thumbnail.
+   *
+   * The downscale runs natively on the GPU in the same submission as the
+   * Syphon/Spout send and is read back asynchronously (never a GPU wait on
+   * the send path), then delivered with
+   * `webContents.send(PREVIEW_FRAME_CHANNEL, { width, height, data }, ...extraArgs)`
+   * — `data` is tightly packed upright RGBA. Electron's per-frame
+   * shared-texture import / sync-token flush / release round-trip is not
+   * involved at all. Receive it with `consumePreviewFrames(ipcRenderer, { onFrame })`
+   * from `@napolab/texture-bridge-renderer/client`.
+   *
+   * Same best-effort contract as {@link forwardFrames}: delivery problems
+   * never surface as `"error"` and never affect the Syphon/Spout output;
+   * they are reported as `forwardStatus` / `onStatus` transitions —
+   * including `preview-unavailable` when the native tap cannot be set up.
+   * The native tap only runs while at least one registration exists, and
+   * survives {@link resize}. Returns an inert handle (`active: false`) after
+   * dispose, for an already-destroyed target, or for bounds that are not
+   * finite or round to less than 1.
+   *
+   * Latency: on macOS each preview is delivered from the GPU completion of
+   * its own frame. On Windows (D3D11 has no completion callback) the
+   * readback is polled: by the next send, and — while the tap is on and a
+   * readback is pending — by a short bridge timer, so the last frame of a
+   * deck that stops painting (a paused video, a static page) still arrives
+   * within roughly a timer tick after the GPU finishes it.
+   */
+  forwardPreviewFrames(target: WebContents, options: PreviewFrameForwardOptions): FrameForward;
 
   /** The offscreen BrowserWindow used for rendering */
   readonly renderWindow: BrowserWindow;

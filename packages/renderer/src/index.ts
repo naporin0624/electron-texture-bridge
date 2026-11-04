@@ -10,6 +10,7 @@ export type {
   TextureBridge,
   FrameForwardOptions,
   FrameForward,
+  PreviewFrameForwardOptions,
   ForwardStatus,
   ForwardStatusEvent,
 } from "./types";
@@ -25,7 +26,9 @@ export type {
   SharedTextureReceiverBridgeEvents,
 } from "./shared-texture-receiver";
 export type { SenderDiscoveryEvents } from "./discovery";
-export type { PaintDefect } from "@napolab/texture-bridge-core";
+export type { PaintDefect, PreviewFrame } from "@napolab/texture-bridge-core";
+export { PREVIEW_FRAME_CHANNEL } from "./client/preview-protocol";
+export type { PreviewFrameMessage } from "./client/preview-protocol";
 export { TextureSendError } from "@napolab/texture-bridge-core";
 export {
   FrameReceiveError,

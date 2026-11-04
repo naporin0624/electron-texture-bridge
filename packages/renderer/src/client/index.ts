@@ -13,6 +13,15 @@ export {
   SharedTextureReceiverAlreadyBoundError,
   SharedTextureReceiverDisposedError,
 } from "../errors";
+export { consumePreviewFrames } from "./preview-frame-consumer";
+export type {
+  PreviewFrameIpcSource,
+  PreviewClientFrame,
+  PreviewFrameHandlers,
+  PreviewFrameRegistration,
+} from "./preview-frame-consumer";
+export { PREVIEW_FRAME_CHANNEL, isPreviewFrameMessage } from "./preview-protocol";
+export type { PreviewFrameMessage } from "./preview-protocol";
 export { createMultiDispatcher } from "./multi-dispatcher";
 export type {
   MultiDispatcher,
