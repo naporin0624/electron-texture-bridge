@@ -265,6 +265,22 @@ Source files:
 - `packages/core/src/electron.ts` (`forwardSharedTexture`, `ForwardDefect`)
 - `packages/example/src/main/index.ts` (`multi-connect` handler), `packages/example/src/preload/multiviewer.ts`
 
+### 3.4 forwardPreviewFrames (native downscaled thumbnails)
+
+`TextureBridge.forwardPreviewFrames(target, { width, height, extraArgs, onStatus })` registers into a separate entry set and turns on one native preview tap per bridge (`TextureSender.setPreview`, bounds of the oldest registration; off again when the last entry goes). The tap rides on the send:
+
+- **macOS** (`syphon_bridge.mm`): `publish_and_commit` encodes, after `publishFrameTexture` on the *same* command buffer, a fullscreen-triangle box-filter pass into a private RGBA8 target (sized to fit the bounds) and a blit into a Shared `MTLBuffer` of a 3-slot ring. The publish completion handler copies the bytes out (Metal completion thread) and frees the slot before decrementing the in-flight count, so `syphon_bridge_destroy`'s drain also covers preview delivery. The source is the cached `MTLTexture` wrapper (IOSurface → wrapper cache, ≤16 entries, CFRetained keys, flushed on size/format change and on destroy), so the tap adds no IOSurface wrap.
+- **Windows** (`spout_bridge.cpp`): after `SendTexture`, `CopySubresourceRegion` into mip 0 of a full-resolution mip-chain texture, `GenerateMips`, copy the covering mip level into a staging ring slot, `Flush`. The next `send` maps pending slots with `D3D11_MAP_FLAG_DO_NOT_WAIT` (never stalls) and delivers the newest completed one.
+
+`lib.rs` copies the bytes into a `Vec<u8>` and queues it on an unref'd ThreadsafeFunction (queue bound 2 — a stalled JS thread drops previews). On the JS thread the bridge sends `{ width, height, data }` plus `extraArgs` to every target with `webContents.send(PREVIEW_FRAME_CHANNEL, ...)` and settles the same `forwardStatus` transitions (`preview-unavailable` when `setPreview` throws). The renderer side is `consumePreviewFrames(ipcRenderer)`.
+
+Source files:
+- `packages/native/cpp/mac/syphon_bridge.mm` (`reserve_preview_slot`, `encode_preview`, `deliver_preview`, `wrap_surface_cached`)
+- `packages/native/cpp/win/spout_bridge.cpp` (`encode_preview`, `poll_preview`)
+- `packages/native/src/lib.rs` (`TextureSender::set_preview`, `create_preview_sink`)
+- `packages/renderer/src/bridge.ts` (`forwardPreviewFrames`, `applyPreviewTap`, `handlePreviewFrame`)
+- `packages/renderer/src/client/preview-frame-consumer.ts`, `packages/renderer/src/client/preview-protocol.ts`
+
 ## 4. Native addon layers and threads
 
 ### 4.1 Layers

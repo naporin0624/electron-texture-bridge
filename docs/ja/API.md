@@ -132,6 +132,35 @@ forward.dispose(); // 冪等
 
 現在の実装は、フレームごとに登録済み target の数だけテクスチャを import します。複数 target が同一ソースフレームを共有する場合は「フレームごとに import は 1 回 → 全 target へ send → 全 send の settle 後に release」へ最適化する余地がありますが、現時点でその需要のある呼び出し元がないため（multiviewer は 1 ソース = 1 target）、将来のオプションとして記録するに留め、実装はしていません。
 
+### `TextureBridge.forwardPreviewFrames(target, options)`
+
+```typescript
+// main
+const preview = bridge.forwardPreviewFrames(mainWindow.webContents, {
+  width: 384, // 外接サイズ。アスペクト比は保持し、拡大はしない
+  height: 216,
+  extraArgs: [slot],
+  onStatus: (s) => log(`slot ${slot} preview`, s.ok ? "ok" : s.reason),
+});
+
+// preload (contextIsolation は有効のまま)
+consumePreviewFrames(ipcRenderer, {
+  onFrame: (frame, slot) => {
+    // frame.data: Uint8ClampedArray (width*height*4、上下正立の RGBA)
+    window.postMessage({ slot, ...frame }, "*", [frame.data.buffer]);
+  },
+});
+```
+
+サムネイル表示専用の安価な経路。ネイティブ sender が Syphon/Spout 送出と**同じ GPU サブミッション内**で各フレームを縮小し、3 スロットのリングへ非同期に読み戻す(送出経路で CPU 待ちはしない。遅延は通常 1 フレーム)。RGBA バイト列は `webContents.send(PREVIEW_FRAME_CHANNEL, { width, height, data }, ...extraArgs)` で届く。Electron の sharedTexture 経路(毎フレームの import / 同期 flush / release 往復 / renderer での IOSurface ラップと全解像度コピー)を一切通らない。
+
+- サイズ: macOS は枠にちょうど収まるサイズ、Windows は枠を覆う最小の 2 のべき乗 mip(1080p を 384×216 で頼むと 480×270)。実寸は毎フレームの `width`/`height` を読むこと。tap は bridge につき 1 本で、複数登録時は最も古い登録のサイズが使われる。
+- `includeAlpha: true` の場合 OSR テクスチャは premultiplied なので、`putImageData` では半透明部分が暗く見える。
+- 契約は `forwardFrames` と同じ best-effort: `"error"` は出さず Syphon/Spout 出力にも影響しない。`forwardStatus` / `onStatus` に `send-failed` / `target-destroyed` / `preview-unavailable`(tap を張れない: 非対応プラットフォーム、Metal パイプライン失敗、`setPreview` の無い古いネイティブ binary)が遷移として届く。
+- 登録が 1 つも無い間は GPU 処理も止まる。`resize()` で作り直された sender には自動で張り直す。
+
+詳細は英語版 [API.md](../API.md#texturebridgeforwardpreviewframestarget-options) を参照。
+
 ### `createWorkerRenderer(options)`（`renderer/client` から）
 
 キャンバスから Worker へのパイプラインを設定するレンダラープロセス用ヘルパー。ResizeObserver による自動リサイズ伝播付き。

@@ -13,3 +13,4 @@ Implementation plans that exist but are not yet completed.
 - [x] [Push-based, Non-blocking Syphon Receive](/Users/napochaan/ghq/github.com/naporin0624/electron-texture-bridge/docs/superpowers/plans/2026-11-01-push-receive-zero-wait.md)
 - [x] [bindSharedTextureReceiver — 副作用を明示する受信 API](/Users/napochaan/ghq/github.com/naporin0624/electron-texture-bridge/docs/superpowers/plans/2026-11-01-bind-shared-texture-receiver.md)
 - [x] [Shared-Texture Receiver Fan-out](/Users/napochaan/ghq/github.com/naporin0624/electron-texture-bridge/docs/superpowers/plans/2026-11-02-receiver-fan-out.md)
+- [ ] [Native Preview Frames + Syphon MTLTexture Cache](/Users/napochaan/ghq/github.com/naporin0624/electron-texture-bridge/docs/superpowers/plans/2026-11-04-native-preview-frames.md) — Windows 実機確認待ち
