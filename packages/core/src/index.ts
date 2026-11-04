@@ -52,7 +52,7 @@ export type {
   ReceivedFrame,
   PaintDefect,
 };
-export type { SharedTextureFrame } from "@napolab/texture-bridge";
+export type { SharedTextureFrame, PreviewFrame } from "@napolab/texture-bridge";
 
 /**
  * Platform dispatch onto the native sender. Returns a {@link PaintDefect}

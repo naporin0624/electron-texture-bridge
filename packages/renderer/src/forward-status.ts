@@ -13,7 +13,16 @@ import type { ForwardStatus } from "./types";
  * lives in exactly one place — `target-destroyed` is the only defect without
  * one, so it cannot be spread in blindly.
  */
-export const toForwardStatus = (defect: ForwardDefect | undefined): ForwardStatus => {
+/**
+ * One frame's outcome as seen by a `forwardFrames`-style registration: a
+ * shared-texture {@link ForwardDefect}, or — for `forwardPreviewFrames` — the
+ * native preview tap being unavailable.
+ */
+export type ForwardOutcome =
+  | ForwardDefect
+  | { readonly reason: "preview-unavailable"; readonly cause: Error };
+
+export const toForwardStatus = (defect: ForwardOutcome | undefined): ForwardStatus => {
   if (defect === undefined) return { ok: true };
   if (defect.reason === "target-destroyed") return { ok: false, reason: defect.reason };
   return { ok: false, reason: defect.reason, cause: defect.cause };
