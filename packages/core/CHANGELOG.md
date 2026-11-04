@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.18.0](https://github.com/naporin0624/electron-texture-bridge/compare/core-v0.17.0...core-v0.18.0) (2026-11-04)
+
+
+### Features
+
+* native downscaled preview frames (forwardPreviewFrames) and Syphon texture cache ([8a2c3b3](https://github.com/naporin0624/electron-texture-bridge/commit/8a2c3b332eb5657c1ba2d223374ed3e8cb7e24ad))
+* **renderer:** forwardPreviewFrames and consumePreviewFrames ([a5d4de6](https://github.com/naporin0624/electron-texture-bridge/commit/a5d4de6458c973ab737bce4694dc81d1030dadbb))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @napolab/texture-bridge bumped to 0.18.0
+
 ## [0.17.0](https://github.com/naporin0624/electron-texture-bridge/compare/core-v0.16.0...core-v0.17.0) (2026-11-01)
 
 
