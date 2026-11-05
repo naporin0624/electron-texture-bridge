@@ -137,6 +137,19 @@ impl Receiver {
         })
     }
 
+    /// Adopt a handle from `syphon_debug_receiver_create_for_server` (tests
+    /// only). `None` when the handle is null.
+    #[cfg(test)]
+    pub(super) fn from_handle(handle: ffi::SyphonReceiverHandle) -> Option<Self> {
+        if handle.is_null() {
+            return None;
+        }
+        Some(Self {
+            handle: Some(handle),
+            frame_callback: None,
+        })
+    }
+
     pub fn destroy(&mut self) {
         if let Some(h) = self.handle.take() {
             // Destroy flips the bridge into shutdown under its callback mutex

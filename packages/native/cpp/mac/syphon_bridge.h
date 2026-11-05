@@ -120,6 +120,11 @@ SyphonReceiverHandle syphon_receiver_create(const char* server_uuid,
                                              const char* app_name);
 void     syphon_receiver_destroy(SyphonReceiverHandle handle);
 
+// Test support: create a receiver connected to `sender`'s own server without
+// going through SyphonServerDirectory (whose notifications need the main
+// run loop, which cargo test does not run).
+SyphonReceiverHandle syphon_debug_receiver_create_for_server(SyphonBridgeHandle sender);
+
 // Returns 1 if the server has output a new frame, 0 otherwise.
 int      syphon_receiver_has_new_frame(SyphonReceiverHandle handle);
 

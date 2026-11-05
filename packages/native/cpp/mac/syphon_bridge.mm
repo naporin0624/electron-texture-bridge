@@ -1274,43 +1274,10 @@ static void stage_push_frame(SyphonReceiverBridge* bridge,
     }
 }
 
-SyphonReceiverHandle syphon_receiver_create(const char* server_uuid,
-                                             const char* server_name,
-                                             const char* app_name) {
+// Build a receiver connected to the server `serverDesc` describes. Shared by
+// the directory lookup below and the in-process test hook.
+static SyphonReceiverHandle create_receiver_for_description(NSDictionary* serverDesc) {
     @autoreleasepool {
-        // Find the server in the directory
-        SyphonServerDirectory* dir = [SyphonServerDirectory sharedDirectory];
-        NSArray* servers = dir.servers;
-
-        NSDictionary* serverDesc = nil;
-
-        if (server_uuid) {
-            NSString* uuid = [NSString stringWithUTF8String:server_uuid];
-            for (NSDictionary* desc in servers) {
-                if ([desc[SyphonServerDescriptionUUIDKey] isEqualToString:uuid]) {
-                    serverDesc = desc;
-                    break;
-                }
-            }
-        } else {
-            NSString* name = server_name ? [NSString stringWithUTF8String:server_name] : nil;
-            NSString* app  = app_name ? [NSString stringWithUTF8String:app_name] : nil;
-
-            for (NSDictionary* desc in servers) {
-                BOOL nameMatch = !name || [desc[SyphonServerDescriptionNameKey] isEqualToString:name];
-                BOOL appMatch  = !app  || [desc[SyphonServerDescriptionAppNameKey] isEqualToString:app];
-                if (nameMatch && appMatch) {
-                    serverDesc = desc;
-                    break;
-                }
-            }
-        }
-
-        if (!serverDesc) {
-            NSLog(@"[SyphonReceiver] ERROR: No matching server found");
-            return nullptr;
-        }
-
         auto* bridge = new SyphonReceiverBridge();
         bridge->lastWidth = 0;
         bridge->lastHeight = 0;
@@ -1359,6 +1326,60 @@ SyphonReceiverHandle syphon_receiver_create(const char* server_uuid,
         }
 
         return static_cast<SyphonReceiverHandle>(bridge);
+    }
+}
+
+SyphonReceiverHandle syphon_receiver_create(const char* server_uuid,
+                                             const char* server_name,
+                                             const char* app_name) {
+    @autoreleasepool {
+        // Find the server in the directory
+        SyphonServerDirectory* dir = [SyphonServerDirectory sharedDirectory];
+        NSArray* servers = dir.servers;
+
+        NSDictionary* serverDesc = nil;
+
+        if (server_uuid) {
+            NSString* uuid = [NSString stringWithUTF8String:server_uuid];
+            for (NSDictionary* desc in servers) {
+                if ([desc[SyphonServerDescriptionUUIDKey] isEqualToString:uuid]) {
+                    serverDesc = desc;
+                    break;
+                }
+            }
+        } else {
+            NSString* name = server_name ? [NSString stringWithUTF8String:server_name] : nil;
+            NSString* app  = app_name ? [NSString stringWithUTF8String:app_name] : nil;
+
+            for (NSDictionary* desc in servers) {
+                BOOL nameMatch = !name || [desc[SyphonServerDescriptionNameKey] isEqualToString:name];
+                BOOL appMatch  = !app  || [desc[SyphonServerDescriptionAppNameKey] isEqualToString:app];
+                if (nameMatch && appMatch) {
+                    serverDesc = desc;
+                    break;
+                }
+            }
+        }
+
+        if (!serverDesc) {
+            NSLog(@"[SyphonReceiver] ERROR: No matching server found");
+            return nullptr;
+        }
+
+        return create_receiver_for_description(serverDesc);
+    }
+}
+
+// Test support: SyphonServerDirectory is filled by distributed notifications
+// delivered on the main thread's run loop, which cargo test never runs, so an
+// in-process test cannot find its own server through the directory. Connect
+// straight to the sender's server description instead.
+SyphonReceiverHandle syphon_debug_receiver_create_for_server(SyphonBridgeHandle sender) {
+    if (!sender) return nullptr;
+    @autoreleasepool {
+        NSDictionary* serverDesc = static_cast<SyphonBridge*>(sender)->server.serverDescription;
+        if (!serverDesc) return nullptr;
+        return create_receiver_for_description(serverDesc);
     }
 }
 
