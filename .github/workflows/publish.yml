@@ -3,6 +3,10 @@ name: Publish
 on:
   push:
     branches: [main]
+  # Manual re-run to finish an interrupted release: skips release-please and
+  # builds/publishes whatever version is checked in on main. Already-published
+  # packages are skipped, so this is safe to run more than once.
+  workflow_dispatch:
 
 # Default for every job; the two that need to write ask for it themselves.
 permissions:
@@ -10,6 +14,8 @@ permissions:
 
 jobs:
   release-please:
+    # Only on push; a dispatch publishes the version already on main.
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     # Opens/updates the release PR and cuts the GitHub release.
     permissions:
@@ -26,7 +32,14 @@ jobs:
 
   build:
     needs: [release-please]
-    if: needs.release-please.outputs.releases_created == 'true'
+    # !cancelled() lets this run when release-please was skipped (dispatch).
+    # Push: release-please must have succeeded and cut a release.
+    # Dispatch: only from main, so another branch can never publish.
+    if: >-
+      ${{ !cancelled() && (
+        (github.event_name == 'push' && needs.release-please.result == 'success' && needs.release-please.outputs.releases_created == 'true') ||
+        (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+      ) }}
     strategy:
       fail-fast: false
       matrix:
@@ -141,7 +154,12 @@ jobs:
 
   publish:
     needs: [release-please, build]
-    if: always() && !cancelled() && needs.build.result == 'success' && needs.release-please.outputs.releases_created == 'true'
+    # Same gate as build, plus every build leg must have succeeded.
+    if: >-
+      ${{ !cancelled() && needs.build.result == 'success' && (
+        (github.event_name == 'push' && needs.release-please.result == 'success' && needs.release-please.outputs.releases_created == 'true') ||
+        (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+      ) }}
     runs-on: ubuntu-latest
     name: Publish
     # id-token is the npm OIDC trusted-publishing credential.
@@ -257,34 +275,34 @@ jobs:
             fi
           done
 
-      # All packages use npm publish with OIDC trusted publishing (no NPM_TOKEN needed)
+      # All packages use npm publish with OIDC trusted publishing (no NPM_TOKEN needed).
+      # npm-publish-if-new.sh skips any name@version already on the registry,
+      # so a re-run after a partial publish only sends what is still missing.
       - name: Publish platform packages
         working-directory: packages/native
         run: |
           for dir in npm/*/; do
             if [ -f "$dir/package.json" ]; then
-              echo "Publishing $dir..."
-              cd "$dir"
-              npm publish --access public --provenance
-              cd -
+              (cd "$dir" && bash "$GITHUB_WORKSPACE/.github/scripts/npm-publish-if-new.sh")
             fi
           done
 
       - name: Publish @napolab/texture-bridge
         working-directory: packages/native
-        run: npm publish --access public --provenance
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/npm-publish-if-new.sh"
 
-      # core/renderer: pnpm pack resolves workspace:* deps, then npm publish via OIDC
+      # core/renderer: pnpm pack resolves workspace:* deps, then npm publish via OIDC.
+      # The packed tarball carries the same name/version as package.json.
       - name: Build and publish @napolab/texture-bridge-core
+        working-directory: packages/core
         run: |
           pnpm --filter @napolab/texture-bridge-core run build
-          cd packages/core
           pnpm pack
-          npm publish *.tgz --access public --provenance
+          bash "$GITHUB_WORKSPACE/.github/scripts/npm-publish-if-new.sh" ./*.tgz
 
       - name: Build and publish @napolab/texture-bridge-renderer
+        working-directory: packages/renderer
         run: |
           pnpm --filter @napolab/texture-bridge-renderer run build
-          cd packages/renderer
           pnpm pack
-          npm publish *.tgz --access public --provenance
+          bash "$GITHUB_WORKSPACE/.github/scripts/npm-publish-if-new.sh" ./*.tgz
