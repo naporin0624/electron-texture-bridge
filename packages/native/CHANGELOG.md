@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.18.1](https://github.com/naporin0624/electron-texture-bridge/compare/native-v0.18.0...native-v0.18.1) (2026-11-07)
+
+
+### Bug Fixes
+
+* **native:** return RGBA from receiveFrame() on Windows, as on macOS ([1c77e80](https://github.com/naporin0624/electron-texture-bridge/commit/1c77e80646e84959ac92a8c06903e68f903fa82c))
+
 ## [0.18.0](https://github.com/naporin0624/electron-texture-bridge/compare/native-v0.17.0...native-v0.18.0) (2026-11-04)
 
 
