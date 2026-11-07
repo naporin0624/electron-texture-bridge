@@ -63,6 +63,10 @@ extern "C" {
         app_name: *const c_char,
     ) -> SyphonReceiverHandle;
     pub fn syphon_receiver_destroy(handle: SyphonReceiverHandle);
+    #[allow(dead_code)]
+    pub fn syphon_debug_receiver_create_for_server(
+        sender: SyphonBridgeHandle,
+    ) -> SyphonReceiverHandle;
     pub fn syphon_receiver_has_new_frame(handle: SyphonReceiverHandle) -> i32;
     pub fn syphon_receiver_receive_rgba(
         handle: SyphonReceiverHandle,
