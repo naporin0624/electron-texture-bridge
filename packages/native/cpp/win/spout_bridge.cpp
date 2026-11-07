@@ -1354,6 +1354,23 @@ int32_t spout_receiver_has_new_frame(void* handle) {
     return bridge->frameCount->IsFrameNew() ? 1 : 0;
 }
 
+// True for the DXGI formats whose bytes are B, G, R, A in memory.
+static bool spout_format_is_bgra(DWORD format) {
+    return format == DXGI_FORMAT_B8G8R8A8_UNORM ||
+           format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB ||
+           format == DXGI_FORMAT_B8G8R8A8_TYPELESS;
+}
+
+// BGRA to RGBA, one row (matches syphon_convert_bgra_to_rgba on macOS).
+static void spout_convert_bgra_to_rgba(const uint8_t* src, uint8_t* dst, uint32_t pixel_count) {
+    for (uint32_t i = 0; i < pixel_count; i++) {
+        dst[i * 4 + 0] = src[i * 4 + 2];
+        dst[i * 4 + 1] = src[i * 4 + 1];
+        dst[i * 4 + 2] = src[i * 4 + 0];
+        dst[i * 4 + 3] = src[i * 4 + 3];
+    }
+}
+
 // Return codes:
 //   0 = frame received successfully
 //   1 = no new frame (poll again later)
@@ -1403,12 +1420,20 @@ int32_t spout_receiver_receive_rgba(void* handle,
     HRESULT hr = bridge->context->Map(bridge->cpuStaging, 0, D3D11_MAP_READ, 0, &mapped);
     if (FAILED(hr)) return -1;
 
+    // receiveFrame() promises RGBA (and the macOS path converts, see
+    // syphon_receiver_receive_rgba). Spout senders are usually BGRA, Electron's
+    // compositor output always, so swap R and B for the BGRA formats.
     const uint32_t rowBytes = bridge->senderWidth * 4;
     const uint8_t* src = static_cast<const uint8_t*>(mapped.pData);
+    const bool needSwap = spout_format_is_bgra(bridge->senderFormat);
     for (unsigned int row = 0; row < bridge->senderHeight; ++row) {
-        memcpy(out_buffer + row * rowBytes,
-               src + row * mapped.RowPitch,
-               rowBytes);
+        const uint8_t* srcRow = src + row * mapped.RowPitch;
+        uint8_t* dstRow = out_buffer + row * rowBytes;
+        if (needSwap) {
+            spout_convert_bgra_to_rgba(srcRow, dstRow, bridge->senderWidth);
+        } else {
+            memcpy(dstRow, srcRow, rowBytes);
+        }
     }
     bridge->context->Unmap(bridge->cpuStaging, 0);
 
