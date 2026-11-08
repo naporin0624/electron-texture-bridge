@@ -283,12 +283,29 @@ static bool ensure_preview_resources(SpoutBridge* bridge, const D3D11_TEXTURE2D_
     return true;
 }
 
+// True for the DXGI formats whose bytes are B, G, R, A in memory.
+static bool spout_format_is_bgra(DWORD format) {
+    return format == DXGI_FORMAT_B8G8R8A8_UNORM ||
+           format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB ||
+           format == DXGI_FORMAT_B8G8R8A8_TYPELESS;
+}
+
+// BGRA to RGBA, one row (matches syphon_convert_bgra_to_rgba on macOS).
+static void spout_convert_bgra_to_rgba(const uint8_t* src, uint8_t* dst, uint32_t pixel_count) {
+    for (uint32_t i = 0; i < pixel_count; i++) {
+        dst[i * 4 + 0] = src[i * 4 + 2];
+        dst[i * 4 + 1] = src[i * 4 + 1];
+        dst[i * 4 + 2] = src[i * 4 + 0];
+        dst[i * 4 + 3] = src[i * 4 + 3];
+    }
+}
+
 // Copy one mapped staging slot into `scratch` as tightly packed RGBA.
 static void read_mapped_preview(SpoutPreview& preview, const D3D11_MAPPED_SUBRESOURCE& mapped) {
     const uint32_t w = preview.levelWidth;
     const uint32_t h = preview.levelHeight;
     preview.scratch.resize(static_cast<size_t>(w) * h * 4);
-    const bool bgra = preview.format == DXGI_FORMAT_B8G8R8A8_UNORM;
+    const bool bgra = spout_format_is_bgra(preview.format);
     for (uint32_t y = 0; y < h; y++) {
         const uint8_t* src = static_cast<const uint8_t*>(mapped.pData) +
                              static_cast<size_t>(y) * mapped.RowPitch;
@@ -297,12 +314,7 @@ static void read_mapped_preview(SpoutPreview& preview, const D3D11_MAPPED_SUBRES
             memcpy(dst, src, static_cast<size_t>(w) * 4);
             continue;
         }
-        for (uint32_t x = 0; x < w; x++) {
-            dst[x * 4 + 0] = src[x * 4 + 2];
-            dst[x * 4 + 1] = src[x * 4 + 1];
-            dst[x * 4 + 2] = src[x * 4 + 0];
-            dst[x * 4 + 3] = src[x * 4 + 3];
-        }
+        spout_convert_bgra_to_rgba(src, dst, w);
     }
 }
 
@@ -1352,23 +1364,6 @@ int32_t spout_receiver_has_new_frame(void* handle) {
     SpoutReceiverBridge* bridge = static_cast<SpoutReceiverBridge*>(handle);
     std::lock_guard<std::mutex> lock(bridge->ioMutex);
     return bridge->frameCount->IsFrameNew() ? 1 : 0;
-}
-
-// True for the DXGI formats whose bytes are B, G, R, A in memory.
-static bool spout_format_is_bgra(DWORD format) {
-    return format == DXGI_FORMAT_B8G8R8A8_UNORM ||
-           format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB ||
-           format == DXGI_FORMAT_B8G8R8A8_TYPELESS;
-}
-
-// BGRA to RGBA, one row (matches syphon_convert_bgra_to_rgba on macOS).
-static void spout_convert_bgra_to_rgba(const uint8_t* src, uint8_t* dst, uint32_t pixel_count) {
-    for (uint32_t i = 0; i < pixel_count; i++) {
-        dst[i * 4 + 0] = src[i * 4 + 2];
-        dst[i * 4 + 1] = src[i * 4 + 1];
-        dst[i * 4 + 2] = src[i * 4 + 0];
-        dst[i * 4 + 3] = src[i * 4 + 3];
-    }
 }
 
 // Return codes:

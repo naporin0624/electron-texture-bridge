@@ -367,4 +367,63 @@ mod tests {
             "right half must be RGBA"
         );
     }
+
+    // The sender preview tap is documented as tightly packed RGBA, like
+    // `receiveFrame()`. A B8G8R8A8 frame sent with the tap set must reach the
+    // callback with R and B in place. The preview is a mip level, so columns
+    // near the left/right boundary are blended; sample well inside each half.
+    #[test]
+    fn preview_tap_returns_rgba_byte_order() {
+        use std::sync::{Arc, Mutex};
+        use std::time::{Duration, Instant};
+
+        const WIDTH: u32 = 64;
+        const HEIGHT: u32 = 32;
+        // Same logical colours as receive_rgba_returns_rgba_byte_order.
+        let left_bgra = [50, 100, 200, 255];
+        let right_bgra = [240, 150, 10, 255];
+        let frame = split_frame(WIDTH, HEIGHT, left_bgra, right_bgra);
+        let source = SharedSourceTexture::bgra(&frame, WIDTH, HEIGHT);
+
+        let mut sender =
+            Sender::new("etb-preview-rgba-order-test", WIDTH, HEIGHT).expect("create Spout sender");
+        let latest: Arc<Mutex<Option<(Vec<u8>, u32, u32)>>> = Arc::new(Mutex::new(None));
+        let sink = Arc::clone(&latest);
+        sender
+            .set_preview(
+                WIDTH / 2,
+                HEIGHT / 2,
+                Some(Box::new(move |rgba, width, height| {
+                    *sink.lock().unwrap() = Some((rgba.to_vec(), width, height));
+                })),
+            )
+            .expect("set preview tap");
+
+        // The readback is asynchronous (staging ring, Map DO_NOT_WAIT), so
+        // keep sending and polling until the callback has fired.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let (pixels, width, height) = loop {
+            sender.send(source.raw_handle()).expect("send shared texture via Spout");
+            sender.poll_preview();
+            if let Some(preview) = latest.lock().unwrap().take() {
+                break preview;
+            }
+            assert!(Instant::now() < deadline, "no preview delivered within 5 s");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+
+        assert_eq!((width, height), (WIDTH / 2, HEIGHT / 2));
+        assert_eq!(pixels.len(), (width * height * 4) as usize);
+        let y = height / 2;
+        assert_eq!(
+            rgba_at(&pixels, width, 2, y),
+            [200, 100, 50, 255],
+            "left half must be RGBA"
+        );
+        assert_eq!(
+            rgba_at(&pixels, width, width - 3, y),
+            [10, 150, 240, 255],
+            "right half must be RGBA"
+        );
+    }
 }
